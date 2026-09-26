@@ -22,9 +22,9 @@ You can also paste a whole METAR into the bar. Twelve recorded reports (from 26 
 
 | In the sky | Comes from | How |
 | --- | --- | --- |
-| Cloud layers | `FEW/SCT/BKN/OVC` + base, e.g. `BKN025` | Coverage = the middle of each okta range (1.5, 3.5, 6, 8 eighths). The base is the reported height above the airport. Up to four layers are drawn. |
+| Cloud layers | `FEW/SCT/BKN/OVC` + base, e.g. `BKN025` | Coverage = the middle of each okta range (1.5, 3.5, 6, 8 eighths), **measured**: seen straight up from below, every style of layer covers that amount to within half an okta (see Tests). The base is the reported height above the airport. Up to four layers are drawn. |
 | Cloud style and thickness | height of the base, `CB`/`TCU` | **Style choice.** A METAR does not give thickness or shape. Low FEW/SCT are drawn as heaped cells, low BKN/OVC as a flatter deck, mid-level as a thin layer, high as streaks along the wind, and CB/TCU as tall towers. |
-| Haze and fog | visibility (`9999`, `4500`, `1/2SM`, `CAVOK`), `BR`/`HZ`/`FG`/`FU`/…, `VV` | Koschmieder: extinction β = 3.912 ÷ visibility, fading exponentially with height. "10 km or more" style reports are drawn for 3× the floor (30 km). `VV` makes the fog deep enough to hide the sky. Haze and smoke get a warmer tint. |
+| Haze and fog | visibility (`9999`, `4500`, `1/2SM`, `CAVOK`), `BR`/`HZ`/`FG`/`FU`/…, `VV` | Koschmieder: extinction β = 3.912 ÷ visibility, fading exponentially with height. "10 km or more" style reports are drawn for 3× the floor (30 km). `VV` makes the fog deep enough to hide the sky and lights the scene like a full cloud deck. Deep fog is lit by multiply scattered, grey light, so daytime fog is bright white-grey. Haze and smoke get a warmer tint. |
 | Cloud drift | wind (`27015G25KT`, `VRB03KT`, `240V300`, MPS/KMH) | Clouds move toward where the wind blows, at the reported surface speed, in real time. Gusts make the speed pulse. `VRB` uses the middle of a reported sector, or an arbitrary westerly, and says so. |
 | Sun | station position + observation time | NOAA's solar position equations (after Meeus). The station position comes from the same upstream API. If the position is unknown, the light is a neutral daylight and no sun disc is drawn. |
 | Rain / snow streaks | `-RA`, `+SHRA`, `DZ`, `SN`, … | Intensity from `-`/none/`+`. Vicinity (`VC`) weather is described but not drawn. |
@@ -38,11 +38,15 @@ The product is a fragment shader (`src/shaders/sky.frag`, WebGL2 / GLSL ES 3.00)
 
 - integrates **single scattering through a spherical atmosphere** (Rayleigh, Mie and ozone), with a Chapman-style airmass so twilight and the Earth's shadow behave;
 - **ray-marches each cloud layer as a volume**, using coarse steps through empty air and fine steps once it touches cloud. At each sample it marches toward the sun for self-shadowing, then applies a two-lobe Henyey–Greenstein phase function, a three-octave multiple-scattering approximation, "powder" darkening, and sky and ground ambient light. Layers above shade the layers below. Clouds stay lit after ground sunset if the sun is still above *their* horizon;
-- applies **height-exponential haze** from the visibility, lit by the sun through a forward-scattering phase function;
+- applies **height-exponential haze** from the visibility, lit by the sun through a forward-scattering phase function. As the haze deepens, a growing share of its light is multiply scattered (the Poisson chance of two or more scatterings, 1 − (1 + τ)e^−τ): that part loses the sky's blue and adds the sunlight that diffuses down through the layer (two-stream transmission), so fog under a VV report is bright white-grey by day;
 - adds **stars, the sun disc** (its real 0.53° size, with limb darkening), **precipitation streaks** and the token **highlight**;
-- **tone-maps** the result, then limits brightness behind text so words stay readable, and dithers.
+- **tone-maps** the result, then limits brightness behind text so words stay readable, and dithers. The dimming is one broad falloff per block of text, anchored to the corner or edge the text sits against and fading out in stops, so it reads as the vignette of a window rather than as cards.
 
-A second shader (`noise.frag`) builds the 64³ tileable Perlin–Worley noise volume on the GPU, one slice at a time. The TypeScript then histogram-equalises each channel. That is what makes coverage honest. Once the noise is uniform, "keep the top *c* of it" covers a fraction *c* of the layer, and a closed-form CDF maps the blend of two noise channels back to uniform.
+The sky's diffuse light depends only on the sun, so it is computed once per scene in TypeScript (`src/scene/atmosphere.ts`, a port of the shader's own scattering code, with a test that the constants match) and passed in as a uniform, instead of three sky integrals for every pixel.
+
+A second shader (`noise.frag`) builds the 64³ tileable Perlin–Worley noise volume on the GPU, one slice at a time. The TypeScript then histogram-equalises each channel **slice by slice**. That is what makes coverage honest. Once every horizontal plane of the noise is uniform, "keep the top *c* of it" covers exactly a fraction *c* of that plane, and a closed-form CDF maps the blend of two noise channels back to uniform.
+
+A thick layer, seen from below, shows the union of all its planes, which covers more than any one plane (a 6 km `CB` reported as `FEW` used to fill over half the view). So each style has a calibrated threshold (`DRAWN_COVERAGE` in `src/scene/mapping.ts`), found by bisection with a below-view probe (`npm run calibrate`) and checked by the smoke test.
 
 TypeScript is the thin shell: the METAR parser, the sun calculation, the METAR → uniforms mapping, the quality controller and the UI. Every number the shader receives is decided in `src/scene/mapping.ts`, which is unit-tested.
 
@@ -55,7 +59,14 @@ TypeScript is the thin shell: the METAR parser, the sun calculation, the METAR �
 | low | 0.55 | 1.5 | 30 | 4 | 8 |
 | minimal | 0.4 | 1 | 20 | 3 | 6 |
 
-Desktops start on *medium*, and phones and large screens on *low*. With Save-Data on, it starts on *minimal*. The page watches frame times, drops a tier when the median frame over 30 frames is slower than 24 ms, and climbs back only into tiers that have never been too slow, so it cannot oscillate. The "Quality" button at the bottom shows the tier and the median frame time **measured on your device**, and clicking it fixes a tier. `?q=high` does the same from the URL. `prefers-reduced-motion` freezes the drift and renders only when something changes.
+Desktops start on *medium*, and phones and large screens on *low*. With Save-Data on, it starts on *minimal*. The page watches frame intervals in windows of up to 30 frames or 1.5 seconds, whichever comes first, so a slow GPU is judged in seconds:
+
+- it drops a tier whenever the time-weighted median frame is slower than 24 ms, one tier per window, for as long as frames stay slow;
+- one isolated long frame (a hitch) per window is ignored, and so are the first frames after the tab becomes visible again; a run of long frames is not a hitch;
+- if even *minimal* is slower than 50 ms a frame (under 20 frames a second), it stops animating and draws only when something changes, and the quality label says so ("still: too slow to animate here"). Under SwiftShader, a software GPU at about one second a frame, that took about 15 seconds on the build machine;
+- it climbs back up only while frames keep pace with the display's own refresh interval, and only into tiers that have never been too slow, so it cannot oscillate.
+
+The "Quality" button shows the tier and the frames per second **measured on your device**. That rate is capped by the display (60 on a 60 Hz screen), so it says the page is keeping up, not how long a frame takes to render. Clicking the button fixes a tier (and tries animating again). `?q=high` does the same from the URL. `prefers-reduced-motion` freezes the drift and renders only when something changes.
 
 ## Build, run, test
 
@@ -68,9 +79,10 @@ npm test           # typecheck, unit tests, build, then the headless-Chrome smok
 npm run dev        # build + wrangler dev: the full app with the live Worker on :8787
 npm run serve      # static dist/ only, with the production headers; live lookups fall back to samples
 npm run shots -- --out /tmp/sky-shots   # screenshots of every sample, desktop and 400 px phone
+npm run calibrate  # re-measure DRAWN_COVERAGE (needs a build and Chrome); prints the table
 ```
 
-Useful URLs: `?id=KSFO` (live), `?sample=YSSY` (recorded), `?metar=METAR%20…` (your own), `&still=1` (freeze, for screenshots), `&q=low` (fix a tier), `&focus=7` (highlight a token).
+Useful URLs: `?id=KSFO` (live), `?sample=YSSY` (recorded), `?metar=METAR%20…` (your own), `&still=1` (freeze, for screenshots), `&q=low` (fix a tier), `&focus=7` (highlight a token), `&probe=below` (test hook: cloud opacity seen straight up over a 120 km square, or `&span=480` km).
 
 ### Tests
 
@@ -82,25 +94,35 @@ Useful URLs: `?id=KSFO` (live), `?sample=YSSY` (recorded), `?metar=METAR%20…` 
 - **Sun** (`tests/unit/solar.test.ts`, 22 tests):
   - Meeus' *Astronomical Algorithms* worked examples 25.a and 28.b;
   - 12 airport/time cases against **astropy** (IAU SOFA/ERFA), a completely different method, within 0.03° in elevation. The reference script is `tools/sun-reference.py`.
-- **Mapping and quality** (`tests/unit/mapping.test.ts`): layers, coverage, drift direction and units, Koschmieder, VV depth, precipitation, time resolution, view, exposure, and uniforms matching the shader's declarations. Every one of the 400 real reports maps without a NaN. The tier controller is tested against synthetic frame times.
-- **Worker** (`tests/unit/worker.test.ts`, 26 tests), with mocked upstream and an in-memory Cache API:
+- **Mapping** (`tests/unit/mapping.test.ts`, 34 tests): layers, coverage and its calibration table, layers squeezed too thin to see, drift direction and units, Koschmieder, VV depth, precipitation, time resolution, view, exposure, and uniforms matching the shader's declarations. Every one of the 400 real reports maps without a NaN.
+- **Quality controller** (`tests/unit/quality.test.ts`, 19 tests): sustained 300, 500 and 1,000 ms frames step down to *minimal* and then to still mode within seconds; a SwiftShader-like 1,000 → 330 → 140 ms profile ends in still mode; isolated hitches change nothing, a run of long frames does; frames paced at 60 Hz and 120 Hz step back up; a tier that proved too slow is never re-entered.
+- **Atmosphere, text dimming, noise** (`atmosphere.test.ts`, `scrim.test.ts`): the TypeScript sky ambient uses the shader's exact constants; every corner of every text block gets the full brightness cap; per-slice equalisation makes every plane uniform.
+- **Worker** (`tests/unit/worker.test.ts`, 33 tests), with mocked upstream, an in-memory Cache API and the per-isolate memory cache:
   - validation;
-  - cache hit/miss/expiry ("100 views in 5 minutes cost one upstream request");
-  - unknown station, upstream 500/429, network failure, malformed and oversized bodies, and timeout.
-- **Report/labels/API client** (`tests/unit/report.test.ts`).
+  - cache hit/miss/expiry ("100 views in 5 minutes cost one upstream request"), with the Cache API and, where it is missing, with the memory cache alone;
+  - unknown station, upstream 500/429, network failure, malformed and oversized bodies (including an endless stream, cut off at the cap), and timeout.
+- **Report/labels/API client** (`tests/unit/report.test.ts`, 17 tests), including "below the horizon" at night and honest wording for squeezed layers.
 - **Smoke** (`tests/smoke/dist.test.mjs`, headless Chrome over the DevTools protocol):
   - `dist/` loads and draws with WebGL2, with no console errors;
   - hover and keyboard flows, and the offline fallback;
-  - reduced motion;
-  - a true **400 px** viewport through device emulation, with no horizontal scroll;
-  - a **measured WCAG check**: with the text hidden, it screenshots five bright skies and reads the pixels behind every text box. The dimmer text colour must reach 4.5:1 against the brightest one.
+  - reduced motion, and the frames-per-second label;
+  - a **slow GPU**: under SwiftShader the page steps down to *minimal* and then to still mode, and says so;
+  - a true **400 px** viewport through device emulation: no horizontal scroll, and every METAR group (long `RMK` sections too) inside the screen;
+  - **touch**: the ICAO bar opens from a tap on the sky and closes with its Close control or a tap outside; the hint says "tap outside" on touch and "Esc" with a keyboard;
+  - the served **headers**, merged the way Cloudflare merges `_headers` rules;
+  - a **measured WCAG check**: with the text hidden, it screenshots six bright skies (daytime VV fog among them) and reads the pixels behind every text box. The dimmer text colour must reach 4.5:1 against the brightest one;
+  - **daytime VV fog** is bright and grey: mean saturation under 0.08 (it was 0.49, sky blue, before) and brightness over 0.75;
+  - **cloud cover from below**: 18 reports covering every style and amount, at several heights, measured with the probe (a pixel is cloud when its opacity is over 0.2, over a 480 km square). Each must be within **half an okta (±1/16 of the sky)** of the reported amount. Measured: all within 1 percentage point, e.g. `FEW030CB` 19.2% for a target of 18.75%, `SCT020TCU` 43.9% for 43.75%, `BKN300` 75.0% for 75%.
 
 ## The Worker and the Cloudflare free plan
 
 `worker/` is one endpoint, `GET /api/metar?id=XXXX`. It proxies the public [aviationweather.gov Data API](https://aviationweather.gov/data/api/) (`/api/data/metar?ids=XXXX&format=json`).
 
 - **Validation:** exactly four letters or digits, starting with a letter. Anything else gets a 400 and never reaches upstream.
-- **Cache:** responses are stored with the Workers Cache API for **5 minutes**, keyed by the normalised station code. So one upstream request serves every view of that station in that data centre for five minutes. "No report for that code" is cached too, so a typo can't hammer upstream.
+- **Cache:** two layers, both **5 minutes**, keyed by the normalised station code. "No report for that code" is cached too, so a typo can't hammer upstream.
+  - The Workers **Cache API**, shared by every visitor in one data centre. Cloudflare documents it for Workers on a **custom domain or route**; on a `*.workers.dev` address it is not expected to work, and I have not been able to check either on Cloudflare, because the app is not deployed. **If** the Worker has a route, one upstream request serves every view of a station in that data centre for five minutes.
+  - A small **in-memory cache per Worker isolate** (at most 256 stations, about 1 KB each), used when the Cache API has nothing. It needs no setup, but an isolate serves only some of the requests and can be recycled at any time, so it cuts upstream traffic without guaranteeing "one request per five minutes".
+- **Size cap:** the upstream body is read as a stream and abandoned as soon as it passes 64 KB.
 - **Timeout and errors:** upstream gets 6 s. Errors come back as clear JSON: `invalid_id` (400), `upstream_error` (502, for upstream 5xx/429, bad or oversized bodies, or network failure) and `upstream_timeout` (504). An unknown station is an ordinary answer, `{"error":"unknown_station"}` with status 200, much as upstream itself answers 204 for "no data". That keeps a typo from showing as a failed request in the browser console.
 - **Upstream etiquette:** a descriptive User-Agent, as the API docs ask. The API allows 100 requests a minute.
 
@@ -108,9 +130,10 @@ Useful URLs: `?id=KSFO` (live), `?sample=YSSY` (recorded), `?metar=METAR%20…` 
 
 - Static files in `dist/` are served by Workers static assets, which is free and does not count as Worker requests. Only `/api/*` runs the Worker (`run_worker_first` in `wrangler.toml`).
 - The free plan allows 100,000 Worker requests a day. A page view makes one API call, plus one per station typed, so that is roughly 50,000–100,000 views a day.
-- Upstream traffic is bounded by the cache, not by visitors: at most one request per station per 5 minutes per data centre (288 a day per busy station per data centre), far inside the upstream's 100 a minute.
+- With a route (so the Cache API works), upstream traffic is bounded by the cache, not by visitors: at most one request per station per 5 minutes per data centre (288 a day per busy station per data centre), far inside the upstream's 100 a minute. On `workers.dev` only the per-isolate memory cache applies, so expect more upstream requests than that; how many more depends on how Cloudflare spreads requests over isolates, which I have not measured.
 - The 10 ms CPU limit counts CPU, not waiting. Per request the Worker does a regex check, one cache lookup and one `fetch`, then parses and re-serialises about 1 KB of JSON; waiting on aviationweather.gov is I/O time. I have not measured CPU time on Cloudflare itself, because the app is not deployed yet. Locally, under `wrangler dev`, a cached answer took 2 ms of wall time.
-- Caveat: the Cache API is per data centre. Cloudflare documents working cache operations for Workers on a custom domain, so attach the Worker to a route or custom domain to get the caching.
+- Caveat: the Cache API is per data centre, and Cloudflare documents it for Workers on a custom domain or route. Attach one to get the shared cache.
+- `_headers` gives the content-hashed `/assets/*` a year-long immutable cache and `/` and `/index.html` `no-cache`. Cloudflare joins the values of every matching rule, so the catch-all `/*` rule carries no `Cache-Control` at all (the local server merges rules the same way, and a test checks the result).
 
 **Deploying.** `npm run build`, then `npx wrangler deploy` deploys the Worker and `dist/` together. The owner deploys through a guarded script that pins the right Cloudflare account, so the repo deliberately has no deploy script. `dist/` on its own is also a valid static site (`wrangler pages deploy dist`): without the Worker, the page falls back to the recorded samples and says so.
 
@@ -124,7 +147,9 @@ There are no cookies, analytics or accounts. `localStorage` keeps only the last 
 - **The wind is surface wind.** Real clouds move with the wind at their height, which is usually stronger and often from a different direction.
 - **The sun is placed for the observation time**, not for "now". A report can be up to an hour old, and the label shows its time.
 - **Only four layers are drawn.** Extra layers are listed as not drawn.
-- **CB/TCU are tall cumulus.** There are no anvils, lightning or hail shafts.
+- **CB/TCU are tall cumulus.** There are no anvils, lightning or hail shafts, and the tallest (6 km) towers can show some speckle along their edges.
+- **Coverage is calibrated from straight below.** Looking across the sky toward the horizon you also see the sides of clouds, so a field of tall towers can look like more than its oktas, as it does to a real observer.
+- **Bright fog and overcast need strong dimming behind text.** White text needs a dark background to stay readable, so in a bright white fog the corner and bottom vignettes are heavy.
 - **The stars are decorative** and there is no moon, so moonlit nights are drawn dark.
 - **Night glow under cloud is assumed** (airport and city lights), not reported.
 - **The atmosphere is single scattering plus a rough multiple-scattering term**, so deep twilight colours are approximate.
