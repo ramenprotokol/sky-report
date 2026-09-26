@@ -102,9 +102,10 @@ Useful URLs: `?id=KSFO` (live), `?sample=YSSY` (recorded), `?metar=METAR%20…` 
   - cache hit/miss/expiry ("100 views in 5 minutes cost one upstream request"), with the Cache API and, where it is missing, with the memory cache alone;
   - unknown station, upstream 500/429, network failure, malformed and oversized bodies (including an endless stream, cut off at the cap), and timeout.
 - **Report/labels/API client** (`tests/unit/report.test.ts`, 17 tests), including "below the horizon" at night and honest wording for squeezed layers.
+- **Third-party notices** (`tests/smoke/notices.test.mjs`): `dist/THIRD-PARTY-NOTICES.txt` exists, the page's sources list links to it, and it names every bundled sample station, the recording date, the data's source and terms, and the fonts.
 - **Smoke** (`tests/smoke/dist.test.mjs`, headless Chrome over the DevTools protocol):
   - `dist/` loads and draws with WebGL2, with no console errors;
-  - hover and keyboard flows, and the offline fallback;
+  - hover and keyboard flows (Tab stays inside the "How this is drawn" note and reaches its links), and the offline fallback;
   - reduced motion, and the frames-per-second label;
   - a **slow GPU**: under SwiftShader the page steps down to *minimal* and then to still mode, and says so;
   - a true **400 px** viewport through device emulation: no horizontal scroll, and every METAR group (long `RMK` sections too) inside the screen;
@@ -168,7 +169,8 @@ There are no cookies, analytics or accounts. `localStorage` keeps only the last 
 
 - Weather data: [Aviation Weather Center](https://aviationweather.gov/), NOAA / National Weather Service. Public US-government data. The recorded samples and the test fixture are real reports from that API, fetched on 26 Sep 2026.
 - Sun: NOAA Global Monitoring Laboratory's solar position equations, after Jean Meeus, *Astronomical Algorithms*.
-- Type: [B612 and B612 Mono](https://fonts.google.com/specimen/B612), the typefaces originally designed for Airbus cockpit displays, loaded from Google Fonts.
+- Type: [B612 and B612 Mono](https://fonts.google.com/specimen/B612), the typefaces originally designed for Airbus cockpit displays, loaded from Google Fonts (not shipped in `dist/`). Both are under the SIL Open Font License 1.1.
+- Third-party notices: `npm run build` writes `dist/THIRD-PARTY-NOTICES.txt`, linked from the Sources list in "How this is drawn". It covers the 12 recorded METAR samples bundled into the JavaScript (public US-government data from the Aviation Weather Center; terms per the [NWS disclaimer](https://www.weather.gov/disclaimer)). The bundle contains no third-party code: `scripts/notices.mjs` checks esbuild's metafile at build time and would list, with its licence text, any library taken from `node_modules`. esbuild, TypeScript and `@types/node` are build tools only.
 
 Built with AI assistance (Claude).
 

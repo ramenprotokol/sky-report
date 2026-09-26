@@ -128,6 +128,12 @@ describe('in headless Chrome', { skip: chrome ? false : 'Chrome not found (set C
       await b.evaluate('document.getElementById("how").click()');
       assert.equal(await b.evaluate('document.getElementById("notes").hidden'), false);
       assert.ok((await b.evaluate('document.getElementById("trace").children.length')) >= 3);
+      // Tab stays inside the note and reaches its link to the third-party notices.
+      assert.equal(await b.evaluate('document.activeElement.id'), 'notes-close');
+      await b.key('Tab');
+      assert.equal(await b.evaluate('document.activeElement.getAttribute("href")'), 'THIRD-PARTY-NOTICES.txt');
+      await b.key('Tab');
+      assert.equal(await b.evaluate('document.activeElement.id'), 'notes-close');
       await b.key('Escape');
       assert.equal(await b.evaluate('document.getElementById("notes").hidden'), true);
 

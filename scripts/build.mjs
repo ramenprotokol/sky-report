@@ -1,9 +1,10 @@
 // Builds dist/: bundles the TypeScript shell (shaders inlined as text) with content-hashed
-// names, then copies the static files. Usage: npm run build
+// names, copies the static files and writes THIRD-PARTY-NOTICES.txt. Usage: npm run build
 import { build } from 'esbuild';
 import { rm, mkdir, readFile, writeFile, readdir, copyFile, stat } from 'node:fs/promises';
 import { join, relative } from 'node:path';
 import { fileURLToPath } from 'node:url';
+import { writeNotices } from './notices.mjs';
 
 const root = fileURLToPath(new URL('..', import.meta.url));
 const dist = join(root, 'dist');
@@ -40,6 +41,9 @@ for (const name of await readdir(pub)) {
   if (name === 'index.html') continue;
   await copyFile(join(pub, name), join(dist, name));
 }
+
+// THIRD-PARTY-NOTICES.txt: bundled third-party code (none today) and the recorded samples.
+await writeNotices({ root, dist, metafile: result.metafile });
 
 const sizes = [];
 for (const p of [js, css, 'index.html']) sizes.push(`${p} ${((await stat(join(dist, p))).size / 1024).toFixed(1)} KiB`);

@@ -400,6 +400,12 @@ button {
   margin-top: 6px;
 }
 
+.notes a {
+  color: var(--ink);
+  text-decoration: underline 1px rgba(218, 213, 203, 0.55);
+  text-underline-offset: 3px;
+}
+
 #notes-close {
   font-family: var(--mono);
   font-size: 10.5px;

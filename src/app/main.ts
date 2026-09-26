@@ -492,10 +492,13 @@ document.addEventListener('keydown', (e) => {
   const target = e.target as HTMLElement;
   if (target === input) return;
   if (!notes.hidden) {
-    // Keep focus inside the note while it is open.
+    // Keep focus inside the note while it is open: Tab cycles its close button and links.
     if (e.key === 'Tab') {
       e.preventDefault();
-      notesClose.focus();
+      const stops = [...notes.querySelectorAll<HTMLElement>('button, a[href]')];
+      const at = stops.indexOf(document.activeElement as HTMLElement);
+      const next = at < 0 ? 0 : (at + (e.shiftKey ? stops.length - 1 : 1)) % stops.length;
+      stops[next]?.focus();
     }
     return;
   }
