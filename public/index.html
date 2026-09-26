@@ -1,0 +1,81 @@
+<!doctype html>
+<html lang="en" data-status="loading">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<title>sky-report</title>
+<meta name="description" content="Type an airport code; see the real current sky, ray-marched from the live weather report.">
+<meta name="color-scheme" content="dark">
+<meta name="theme-color" content="#06080b">
+<link rel="icon" href="favicon.svg" type="image/svg+xml">
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=B612:ital,wght@0,400;0,700;1,400&family=B612+Mono:wght@400;700&display=swap">
+<link rel="stylesheet" href="%CSS%">
+</head>
+<body>
+<canvas id="sky" aria-hidden="true"></canvas>
+
+<header class="chart-label" id="label">
+  <h1 class="ident-row">
+    <button class="ident" id="ident" type="button" aria-haspopup="dialog" aria-controls="bar">
+      <span id="ident-text">····</span><span class="visually-hidden"> — change airport</span>
+    </button>
+  </h1>
+  <p class="hint" id="hint"><span class="kbd-only">Type an ICAO code to change</span><span class="touch-only">Tap the sky to change</span></p>
+  <p id="station-name">&nbsp;</p>
+  <p id="station-pos">&nbsp;</p>
+  <p id="station-obs">&nbsp;</p>
+  <p id="station-sun">&nbsp;</p>
+</header>
+
+<div class="bar" id="bar" role="dialog" aria-modal="false" aria-labelledby="bar-title" hidden>
+  <h2 class="visually-hidden" id="bar-title">Choose an airport</h2>
+  <form id="bar-form" autocomplete="off" novalidate>
+    <label class="visually-hidden" for="icao">ICAO airport code, or a whole METAR</label>
+    <input id="icao" name="icao" type="text" maxlength="600" spellcheck="false" autocapitalize="characters" autocomplete="off" placeholder="ICAO" aria-describedby="bar-hint bar-error">
+  </form>
+  <p class="bar-hint" id="bar-hint">Enter a 4-character code for the live report, or paste a whole METAR. Esc closes.</p>
+  <div class="samples" id="samples" role="group" aria-label="Recorded sample reports"></div>
+  <p class="bar-error" id="bar-error" role="alert"></p>
+</div>
+
+<footer class="readout" id="readout">
+  <p class="explain" id="explain" aria-live="polite">&nbsp;</p>
+  <p class="metar" id="metar" role="group" aria-label="The raw METAR, one button per group">&nbsp;</p>
+  <p class="meta">
+    <span id="attribution">METAR · NOAA / NWS Aviation Weather Center · aviationweather.gov</span>
+    <button type="button" id="how" aria-haspopup="dialog" aria-controls="notes">How this is drawn</button>
+    <button type="button" id="quality" title="Change render quality">Quality auto</button>
+  </p>
+</footer>
+
+<section class="notes" id="notes" role="dialog" aria-modal="true" aria-labelledby="notes-title" hidden>
+  <div class="notes-head">
+    <h2 id="notes-title">How this is drawn</h2>
+    <button type="button" id="notes-close">Close</button>
+  </div>
+  <p>The sky is computed in a WebGL2 fragment shader from the report below it. It is an honest approximation, not a photograph: the amounts, heights, visibility, wind and sun come from data; shapes and colours are a model.</p>
+  <h3>From this report</h3>
+  <ul id="trace"></ul>
+  <h3>Style choices, not data</h3>
+  <ul>
+    <li>Cloud shapes are procedural noise. A METAR gives only how much of the sky is covered and the height of the cloud base; thickness and style (heaped, flat, streaky) are chosen from that height.</li>
+    <li>Colours come from a simplified single-scattering atmosphere with a rough multiple-scattering term, then a film-like tone curve.</li>
+    <li>Stars are decorative and randomly placed, not a star map. There is no moon yet.</li>
+    <li>At night, low cloud and fog get a faint warm glow from below, standing in for airport and city lights. That is an assumption; the report says nothing about it.</li>
+    <li>The ground is a plain dark plane, not the real terrain, seen from about 25 m up, roughly a control-tower cab. With a low sun the view faces the sun's side of the sky, so sunrise, sunset and twilight are in frame; with a high sun it faces away, so clouds are lit from the front. The label gives the viewing bearing (VIEW).</li>
+    <li>Text areas are dimmed where the sky is bright so the words stay readable.</li>
+  </ul>
+  <h3>Sources</h3>
+  <ul>
+    <li>Live reports: the Aviation Weather Center Data API (aviationweather.gov), NOAA / National Weather Service. Public US-government data. Station position also comes from that API.</li>
+    <li>Sun position: NOAA's solar position equations (after Meeus, <i>Astronomical Algorithms</i>).</li>
+    <li>Haze: Koschmieder's relation between visibility and extinction.</li>
+  </ul>
+</section>
+
+<noscript><p class="noscript">sky-report draws the sky with JavaScript and WebGL2. Please enable JavaScript.</p></noscript>
+<script type="module" src="%JS%"></script>
+</body>
+</html>
