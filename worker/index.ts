@@ -2,7 +2,7 @@
  * Cloudflare Worker entry. Static files in dist/ are served by the assets binding;
  * only /api/* reaches this code (see run_worker_first in wrangler.toml).
  */
-import { handleRequest, type CacheLike } from './handler.ts';
+import { handleRequest, MemoryCache, type CacheLike } from './handler.ts';
 
 interface Env {
   ASSETS: { fetch: (req: Request) => Promise<Response> };
@@ -14,6 +14,9 @@ interface Ctx {
 
 declare const caches: { default: CacheLike };
 
+/** Lives as long as this isolate: a fallback where the Cache API is unavailable (workers.dev). */
+const memory = new MemoryCache();
+
 export default {
   async fetch(req: Request, env: Env, ctx: Ctx): Promise<Response> {
     const url = new URL(req.url);
@@ -21,6 +24,7 @@ export default {
       return handleRequest(req, {
         fetch: (input, init) => fetch(input, init),
         cache: caches.default,
+        memory,
         waitUntil: (p) => ctx.waitUntil(p),
       });
     }

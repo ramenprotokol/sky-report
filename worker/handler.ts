@@ -21,9 +21,58 @@ export interface CacheLike {
   put(key: Request, res: Response): Promise<void>;
 }
 
+/** Most stations kept by one isolate's in-memory cache. ~1 KB each, so well under 1 MB. */
+export const MEMORY_CACHE_ENTRIES = 256;
+
+interface MemoryEntry {
+  expires: number;
+  status: number;
+  body: string;
+}
+
+/**
+ * A small per-isolate cache in memory, in front of the Cache API. The Cache API only works for
+ * a Worker on a custom domain or route (not on *.workers.dev), and is per data centre; this one
+ * needs no setup, but lives only as long as one Worker isolate and is not shared between them.
+ * Bounded: when full, the oldest entry goes. Entries expire after CACHE_SECONDS.
+ */
+export class MemoryCache {
+  private map = new Map<string, MemoryEntry>();
+  private readonly maxEntries: number;
+  constructor(maxEntries = MEMORY_CACHE_ENTRIES) {
+    this.maxEntries = maxEntries;
+  }
+
+  get(key: string, now: number): MemoryEntry | null {
+    const e = this.map.get(key);
+    if (!e) return null;
+    if (e.expires <= now) {
+      this.map.delete(key);
+      return null;
+    }
+    return e;
+  }
+
+  set(key: string, entry: MemoryEntry): void {
+    this.map.delete(key);
+    this.map.set(key, entry);
+    while (this.map.size > this.maxEntries) {
+      const oldest = this.map.keys().next().value;
+      if (oldest === undefined) break;
+      this.map.delete(oldest);
+    }
+  }
+
+  get size(): number {
+    return this.map.size;
+  }
+}
+
 export interface Deps {
   fetch: (input: Request | string, init?: RequestInit) => Promise<Response>;
   cache: CacheLike | null;
+  /** Per-isolate fallback cache (index.ts keeps one per isolate). */
+  memory?: MemoryCache | null;
   waitUntil?: (p: Promise<unknown>) => void;
   now?: () => number;
   timeoutMs?: number;
@@ -116,11 +165,37 @@ export function toPayload(id: string, data: unknown, now: number): MetarPayload 
   };
 }
 
-async function readCapped(res: Response): Promise<string | null> {
+/**
+ * Read at most MAX_UPSTREAM_BYTES of the body, streaming: an oversized answer is abandoned as soon
+ * as it passes the cap, without ever holding more than the cap (plus one chunk) in memory.
+ */
+export async function readCapped(res: Response, maxBytes = MAX_UPSTREAM_BYTES): Promise<string | null> {
   const len = Number(res.headers.get('content-length') ?? '0');
-  if (len > MAX_UPSTREAM_BYTES) return null;
-  const text = await res.text();
-  return text.length > MAX_UPSTREAM_BYTES ? null : text;
+  if (len > maxBytes) {
+    await res.body?.cancel().catch(() => undefined);
+    return null;
+  }
+  if (!res.body) return '';
+  const reader = res.body.getReader();
+  const chunks: Uint8Array[] = [];
+  let total = 0;
+  for (;;) {
+    const { done, value } = await reader.read();
+    if (done) break;
+    total += value.byteLength;
+    if (total > maxBytes) {
+      await reader.cancel().catch(() => undefined);
+      return null;
+    }
+    chunks.push(value);
+  }
+  const all = new Uint8Array(total);
+  let at = 0;
+  for (const c of chunks) {
+    all.set(c, at);
+    at += c.byteLength;
+  }
+  return new TextDecoder().decode(all);
 }
 
 export async function handleRequest(req: Request, deps: Deps): Promise<Response> {
@@ -142,6 +217,18 @@ export async function handleRequest(req: Request, deps: Deps): Promise<Response>
       res.headers.set('x-cache', 'HIT');
       return res;
     }
+  }
+  const mem = deps.memory?.get(id, now);
+  if (mem) {
+    return new Response(mem.body, {
+      status: mem.status,
+      headers: {
+        'content-type': 'application/json; charset=utf-8',
+        'x-content-type-options': 'nosniff',
+        'cache-control': 'public, max-age=60',
+        'x-cache': 'HIT-MEMORY',
+      },
+    });
   }
 
   const upstreamUrl = `${UPSTREAM}?ids=${id}&format=json`;
@@ -185,16 +272,23 @@ export async function handleRequest(req: Request, deps: Deps): Promise<Response>
     clearTimeout(timer);
   }
 
-  let res: Response;
+  let bodyText: string;
+  let ttl: number;
   if (payload) {
-    res = json(payload, 200, { 'cache-control': `public, max-age=${CACHE_SECONDS}` });
+    bodyText = JSON.stringify(payload);
+    ttl = CACHE_SECONDS;
   } else if (unknown) {
-    res = json({ error: 'unknown_station', message: MESSAGES.unknown_station }, STATUS.unknown_station, {
-      'cache-control': `public, max-age=${NEGATIVE_CACHE_SECONDS}`,
-    });
+    bodyText = JSON.stringify({ error: 'unknown_station', message: MESSAGES.unknown_station });
+    ttl = NEGATIVE_CACHE_SECONDS;
   } else {
     return error('upstream_error', { 'x-cache': 'MISS' });
   }
+  const status = payload ? 200 : STATUS.unknown_station;
+  const res = new Response(bodyText, {
+    status,
+    headers: { 'content-type': 'application/json; charset=utf-8', 'x-content-type-options': 'nosniff', 'cache-control': `public, max-age=${ttl}` },
+  });
+  deps.memory?.set(id, { expires: now + ttl * 1000, status, body: bodyText });
 
   if (deps.cache) {
     const put = deps.cache.put(cacheKey, res.clone());

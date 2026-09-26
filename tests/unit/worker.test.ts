@@ -1,6 +1,19 @@
 import { test, describe } from 'node:test';
 import assert from 'node:assert/strict';
-import { handleRequest, normaliseId, toPayload, UPSTREAM, USER_AGENT, CACHE_SECONDS, MAX_UPSTREAM_BYTES, type CacheLike, type Deps } from '../../worker/handler.ts';
+import {
+  handleRequest,
+  normaliseId,
+  toPayload,
+  readCapped,
+  MemoryCache as IsolateCache,
+  UPSTREAM,
+  USER_AGENT,
+  CACHE_SECONDS,
+  MAX_UPSTREAM_BYTES,
+  MEMORY_CACHE_ENTRIES,
+  type CacheLike,
+  type Deps,
+} from '../../worker/handler.ts';
 import worker from '../../worker/index.ts';
 
 /** In-memory stand-in for the Workers Cache API, honouring Cache-Control max-age like the real one. */
@@ -193,6 +206,66 @@ describe('caching (5 minutes, one upstream request serves many views)', () => {
   });
 });
 
+describe('per-isolate memory cache (fallback where the Cache API does not work, e.g. workers.dev)', () => {
+  test('with no Cache API, 100 views in 5 minutes on one isolate still cost one upstream request', async () => {
+    const h = harness(() => new Response(EGLL_JSON));
+    h.deps.cache = null;
+    h.deps.memory = new IsolateCache();
+    const first = await handleRequest(req('?id=EGLL'), h.deps);
+    assert.equal(first.headers.get('x-cache'), 'MISS');
+    let last: Response = first;
+    for (let i = 0; i < 99; i++) {
+      h.advance(2_900);
+      last = await handleRequest(req('?id=egll'), h.deps);
+    }
+    assert.equal(h.calls.length, 1);
+    assert.equal(last.headers.get('x-cache'), 'HIT-MEMORY');
+    assert.equal(last.headers.get('cache-control'), 'public, max-age=60');
+    assert.deepEqual(await body(last), await body(first));
+  });
+
+  test('entries expire after 5 minutes', async () => {
+    const h = harness(() => new Response(EGLL_JSON));
+    h.deps.cache = null;
+    h.deps.memory = new IsolateCache();
+    await handleRequest(req('?id=EGLL'), h.deps);
+    h.advance(CACHE_SECONDS * 1000 + 1);
+    assert.equal((await handleRequest(req('?id=EGLL'), h.deps)).headers.get('x-cache'), 'MISS');
+    assert.equal(h.calls.length, 2);
+  });
+
+  test('unknown stations are remembered too; errors are not', async () => {
+    let status = 204;
+    const h = harness(() => new Response(null, { status }));
+    h.deps.cache = null;
+    h.deps.memory = new IsolateCache();
+    await handleRequest(req('?id=ZZZZ'), h.deps);
+    assert.equal((await body(await handleRequest(req('?id=ZZZZ'), h.deps))).error, 'unknown_station');
+    assert.equal(h.calls.length, 1);
+    status = 500;
+    await handleRequest(req('?id=EGLL'), h.deps);
+    await handleRequest(req('?id=EGLL'), h.deps);
+    assert.equal(h.calls.length, 3);
+  });
+
+  test('bounded: the oldest station is dropped when full', () => {
+    const m = new IsolateCache(3);
+    for (const id of ['AAAA', 'BBBB', 'CCCC', 'DDDD']) m.set(id, { expires: 10, status: 200, body: id });
+    assert.equal(m.size, 3);
+    assert.equal(m.get('AAAA', 0), null);
+    assert.equal(m.get('DDDD', 0)?.body, 'DDDD');
+    assert.ok(MEMORY_CACHE_ENTRIES <= 1000);
+  });
+
+  test('the Cache API still answers first when it has the entry', async () => {
+    const h = harness(() => new Response(EGLL_JSON));
+    h.deps.memory = new IsolateCache();
+    await handleRequest(req('?id=EGLL'), h.deps);
+    await Promise.all(h.pending);
+    assert.equal((await handleRequest(req('?id=EGLL'), h.deps)).headers.get('x-cache'), 'HIT');
+  });
+});
+
 describe('errors', () => {
   test('unknown station: upstream 204 → 200 with error unknown_station, and the answer is cached', async () => {
     const h = harness(() => new Response(null, { status: 204 }));
@@ -246,6 +319,35 @@ describe('errors', () => {
   test('oversized upstream body → 502, never parsed', async () => {
     const h = harness(() => new Response('[' + ' '.repeat(MAX_UPSTREAM_BYTES + 10) + ']'));
     assert.equal((await handleRequest(req('?id=EGLL'), h.deps)).status, 502);
+  });
+
+  test('an endless upstream body is cut off at the cap while streaming, not buffered whole', async () => {
+    const CHUNK = 8 * 1024;
+    let pulled = 0;
+    let cancelled = false;
+    const endless = new ReadableStream<Uint8Array>({
+      pull(ctrl) {
+        pulled += CHUNK;
+        ctrl.enqueue(new Uint8Array(CHUNK).fill(32));
+      },
+      cancel() {
+        cancelled = true;
+      },
+    });
+    const h = harness(() => new Response(endless, { status: 200 }));
+    const res = await handleRequest(req('?id=EGLL'), h.deps);
+    assert.equal(res.status, 502);
+    assert.equal(cancelled, true);
+    // At most the cap plus a chunk or two of read-ahead was ever pulled.
+    assert.ok(pulled <= MAX_UPSTREAM_BYTES + 3 * CHUNK, `pulled ${pulled} bytes`);
+  });
+
+  test('readCapped: a lying content-length is refused up front; a small body is read exactly', async () => {
+    const big = new Response('x', { headers: { 'content-length': String(MAX_UPSTREAM_BYTES + 1) } });
+    assert.equal(await readCapped(big), null);
+    assert.equal(await readCapped(new Response('é[]')), 'é[]');
+    assert.equal(await readCapped(new Response('abcdef'), 5), null);
+    assert.equal(await readCapped(new Response('abcde'), 5), 'abcde');
   });
 
   test('slow upstream is cut off at the timeout → 504 upstream_timeout', async () => {
