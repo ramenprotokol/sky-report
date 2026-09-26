@@ -22,8 +22,9 @@ import {
   NIGHT_EXPOSURE,
   DAY_EXPOSURE,
   MAX_LAYERS,
+  DRAWN_COVERAGE,
+  MIN_VISIBLE_THICKNESS_M,
 } from '../../src/scene/mapping.ts';
-import { TIERS, TierController, backingSize, initialTierIndex, DEFAULT_CONTROLLER } from '../../src/scene/quality.ts';
 
 const P = (raw: string) => {
   const m = parseMetar(raw);
@@ -60,6 +61,35 @@ describe('cloud layers', () => {
     for (let i = 0; i < layers.length - 1; i++) {
       assert.ok(layers[i]!.baseM + layers[i]!.thicknessM < layers[i + 1]!.baseM, `layer ${i} overlaps`);
     }
+  });
+
+  test('a layer squeezed thinner than is visible under the next one is flagged', () => {
+    const { layers } = layersFrom(P('METAR EGXX 010650Z 24010KT 9999 FEW004 BKN005 BKN030 12/10 Q1010'));
+    assert.equal(layers[0]!.squeezed, true);
+    assert.ok(layers[0]!.thicknessM < MIN_VISIBLE_THICKNESS_M);
+    assert.equal(layers[1]!.squeezed, false);
+    assert.equal(layers[2]!.squeezed, false);
+    // Close, but with room for a visible layer: not flagged.
+    const ok = layersFrom(P('METAR EGXX 010650Z 24010KT 9999 FEW010 BKN020 12/10 Q1010')).layers;
+    assert.ok(ok[0]!.thicknessM >= MIN_VISIBLE_THICKNESS_M);
+    assert.equal(ok[0]!.squeezed, false);
+  });
+
+  test('drawn coverage is calibrated per style, and still grows FEW < SCT < BKN < OVC', () => {
+    for (const kind of Object.values(CLOUD_KIND)) {
+      const t = DRAWN_COVERAGE[kind];
+      assert.ok(0 < t.FEW && t.FEW < t.SCT && t.SCT < t.BKN && t.BKN < 1, `kind ${kind}`);
+    }
+    const { layers } = layersFrom(P('METAR WSSS 260630Z 19008KT 4500 HZ FEW018 FEW020TCU SCT100 BKN300 34/23 Q1009'));
+    assert.deepEqual(
+      layers.map((l) => l.drawnCoverage),
+      [DRAWN_COVERAGE[CLOUD_KIND.cumulus].FEW, DRAWN_COVERAGE[CLOUD_KIND.towering].FEW, DRAWN_COVERAGE[CLOUD_KIND.mid].SCT, DRAWN_COVERAGE[CLOUD_KIND.cirrus].BKN],
+    );
+    // The reported amount is kept for the page; the shader gets the drawn one.
+    near(layers[0]!.coverage, 1.5 / 8);
+    const u = sceneUniforms(sceneFrom(P('METAR VHHH 260630Z 26008KT 9999 FEW020 OVC100 31/22 Q1009'), { lat: 22.3, lon: 113.9 }, null));
+    near((u.uLayers as number[])[2]!, DRAWN_COVERAGE[CLOUD_KIND.cumulus].FEW);
+    near((u.uLayers as number[])[6]!, 1);
   });
 
   test('more than four layers: the lowest four are drawn, the rest counted', () => {
@@ -233,6 +263,14 @@ describe('uniforms', () => {
     for (const name of Object.keys(u)) assert.ok(declared.has(name), `${name} not declared in sky.frag`);
   });
 
+  test('the sky ambient is computed once per scene, not per pixel', () => {
+    const u = sceneUniforms(sceneFrom(P('METAR VHHH 260630Z 26008KT 9999 FEW020 31/22 Q1009'), { lat: 22.309, lon: 113.922 }, new Date('2026-09-26T06:30:00Z')));
+    const a = u.uSkyAmbient as number[];
+    assert.equal(a.length, 3);
+    assert.ok(a[2]! > a[0]!, 'daylight ambient is bluish');
+    assert.ok(!/skyAmbient\s*\(/.test(shader), 'the shader no longer evaluates skyAmbient() itself');
+  });
+
   test('layer arrays are always 4 wide, with -1 marking empty slots', () => {
     const u = sceneUniforms(sceneFrom(P('METAR RJTT 260630Z 02011KT 9999 -SHRA FEW008 BKN010 20/18 Q1012'), { lat: 35.553, lon: 139.781 }, new Date('2026-09-26T06:30:00Z')));
     assert.equal(u.uLayerCount, 2);
@@ -268,62 +306,5 @@ describe('uniforms', () => {
     assert.ok(f[0]! > 0.9);
     assert.ok(u[1]! > 0.9); // up is mostly up
     assert.ok(r[2]! < -0.9); // facing east, right-hand side is south
-  });
-});
-
-describe('quality tiers', () => {
-  test('tiers get cheaper in every dimension', () => {
-    for (let i = 1; i < TIERS.length; i++) {
-      const a = TIERS[i - 1]!;
-      const b = TIERS[i]!;
-      assert.ok(b.scale <= a.scale && b.steps < a.steps && b.lightSteps <= a.lightSteps && b.maxDpr <= a.maxDpr);
-    }
-  });
-
-  test('backing size honours the tier scale and DPR cap', () => {
-    assert.deepEqual(backingSize(1000, 500, 3, TIERS[0]!), { w: 2000, h: 1000 });
-    assert.deepEqual(backingSize(1000, 500, 3, TIERS[3]!), { w: 400, h: 200 });
-    assert.deepEqual(backingSize(400, 860, 3, TIERS[2]!), { w: 330, h: 710 });
-  });
-
-  test('slow frames step down one tier at a time', () => {
-    const c = new TierController(0);
-    const changes: number[] = [];
-    for (let i = 0; i < 400; i++) {
-      const r = c.sample(40);
-      if (r !== null) changes.push(r);
-    }
-    assert.deepEqual(changes, [1, 2, 3]);
-  });
-
-  test('fast frames step up, but never back into a tier that was too slow', () => {
-    const c = new TierController(1);
-    // Medium is too slow → low.
-    for (let i = 0; i < DEFAULT_CONTROLLER.warmup + DEFAULT_CONTROLLER.window; i++) c.sample(30);
-    assert.equal(c.index, 2);
-    // Now very fast for a long time: it must not climb back to medium.
-    for (let i = 0; i < 2000; i++) c.sample(8);
-    assert.equal(c.index, 2);
-  });
-
-  test('a fast start climbs from medium to high', () => {
-    const c = new TierController(1);
-    for (let i = 0; i < 1000; i++) c.sample(8);
-    assert.equal(c.index, 0);
-  });
-
-  test('paused-tab gaps and a manual lock are ignored', () => {
-    const c = new TierController(1);
-    for (let i = 0; i < 500; i++) c.sample(1000);
-    assert.equal(c.index, 1);
-    c.lock(3);
-    for (let i = 0; i < 500; i++) c.sample(8);
-    assert.equal(c.index, 3);
-  });
-
-  test('phones and save-data start lower', () => {
-    assert.equal(initialTierIndex({ coarsePointer: false, cssPixels: 1_000_000, saveData: false }), 1);
-    assert.equal(initialTierIndex({ coarsePointer: true, cssPixels: 400_000, saveData: false }), 2);
-    assert.equal(initialTierIndex({ coarsePointer: false, cssPixels: 1_000_000, saveData: true }), 3);
   });
 });

@@ -7,6 +7,7 @@
 import type { Metar, CloudLayer } from '../metar/parse.ts';
 import { PRECIPITATION } from '../metar/parse.ts';
 import { solarPosition, sunVector } from '../sun/solar.ts';
+import { skyAmbient } from './atmosphere.ts';
 
 export const FT = 0.3048;
 export const MS_PER_KT = 0.514444;
@@ -19,6 +20,10 @@ export const DRIFT_TIMELAPSE = 1;
 /** Base assumed for a layer reported with an unmeasured base (BKN///). */
 export const ASSUMED_BASE_FT = 5000;
 export const MAX_LAYERS = 4;
+/** Air kept between a layer's top and the next base, m. */
+export const LAYER_GAP_M = 30;
+/** A layer squeezed thinner than this reads as nothing on screen; it is flagged, not hidden. */
+export const MIN_VISIBLE_THICKNESS_M = 120;
 
 export const CLOUD_KIND = { cumulus: 0, stratiform: 1, mid: 2, cirrus: 3, towering: 4 } as const;
 export type CloudKind = (typeof CLOUD_KIND)[keyof typeof CLOUD_KIND];
@@ -31,14 +36,42 @@ export const COVERAGE: Record<CloudLayer['cover'], number> = {
   OVC: 1,
 };
 
+/**
+ * The coverage value the shader thresholds its noise at, per cloud style, so that the layer seen
+ * straight up from below covers the reported amount. One horizontal plane of the noise covers
+ * exactly c (it is equalised per plane), but a thick layer shows the union of all its planes,
+ * which covers more. These values were found by bisection with the below-view probe
+ * (`npm run calibrate`, headless Chrome) and are checked by the smoke test, which requires the
+ * measured cover to be within half an okta (±1/16 of the sky) of the target. OVC is always 1.
+ */
+export const DRAWN_COVERAGE: Record<CloudKind, { FEW: number; SCT: number; BKN: number }> = {
+  0: { FEW: 0.15, SCT: 0.293, BKN: 0.537 }, // cumulus
+  1: { FEW: 0.171, SCT: 0.358, BKN: 0.679 }, // stratiform
+  2: { FEW: 0.163, SCT: 0.323, BKN: 0.598 }, // mid-level
+  3: { FEW: 0.208, SCT: 0.394, BKN: 0.705 }, // cirrus
+  4: { FEW: 0.118, SCT: 0.248, BKN: 0.462 }, // towering
+};
+
+export function drawnCoverage(kind: CloudKind, cover: CloudLayer['cover']): number {
+  return cover === 'OVC' ? 1 : DRAWN_COVERAGE[kind][cover];
+}
+
 export interface LayerParams {
   baseM: number;
   thicknessM: number;
+  /** Reported amount, as a fraction of the sky (the middle of the okta range). */
   coverage: number;
+  /** What the shader is given so the drawn column covers `coverage` (see DRAWN_COVERAGE). */
+  drawnCoverage: number;
   kind: CloudKind;
   /** Index of the METAR cloud layer this came from (for token highlighting). */
   metarIndex: number;
   baseAssumed: boolean;
+  /**
+   * Squeezed so thin under the next layer (below MIN_VISIBLE_THICKNESS_M) that it is not really
+   * visible as a layer of its own. The trace and the token explanation say so.
+   */
+  squeezed: boolean;
 }
 
 export interface SunParams {
@@ -104,9 +137,11 @@ export function layersFrom(metar: Metar): { layers: LayerParams[]; dropped: numb
       baseM,
       thicknessM: layerThicknessM(kind, c.convective, baseM),
       coverage: COVERAGE[c.cover],
+      drawnCoverage: drawnCoverage(kind, c.cover),
       kind,
       metarIndex: i,
       baseAssumed: c.baseFt === null,
+      squeezed: false,
     };
   });
   layers.sort((a, b) => a.baseM - b.baseM);
@@ -114,8 +149,11 @@ export function layersFrom(metar: Metar): { layers: LayerParams[]; dropped: numb
   for (let i = 0; i < layers.length - 1; i++) {
     const a = layers[i]!;
     const b = layers[i + 1]!;
-    const room = b.baseM - a.baseM - 30;
-    if (a.thicknessM > room) a.thicknessM = Math.max(20, room);
+    const room = b.baseM - a.baseM - LAYER_GAP_M;
+    if (a.thicknessM > room) {
+      a.thicknessM = Math.max(20, room);
+      a.squeezed = a.thicknessM < MIN_VISIBLE_THICKNESS_M;
+    }
   }
   return { layers, dropped: Math.max(0, metar.clouds.length - MAX_LAYERS) };
 }
@@ -328,7 +366,7 @@ export function sceneUniforms(s: SceneParams): Record<string, UniformValue> {
   for (let i = 0; i < MAX_LAYERS; i++) {
     const l = s.layers[i];
     if (l) {
-      layers.push(l.baseM, l.thicknessM, l.coverage, l.metarIndex);
+      layers.push(l.baseM, l.thicknessM, l.drawnCoverage, l.metarIndex);
       kinds.push(l.kind);
     } else {
       layers.push(0, 0, 0, -1);
@@ -349,6 +387,7 @@ export function sceneUniforms(s: SceneParams): Record<string, UniformValue> {
     uSunDir: [...s.sun.dir],
     uSunKnown: s.sun.known ? 1 : 0,
     uExposure: s.exposure,
+    uSkyAmbient: skyAmbient(s.sun.dir),
   };
 }
 

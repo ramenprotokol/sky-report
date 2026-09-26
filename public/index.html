@@ -35,9 +35,10 @@
     <label class="visually-hidden" for="icao">ICAO airport code, or a whole METAR</label>
     <input id="icao" name="icao" type="text" maxlength="600" spellcheck="false" autocapitalize="characters" autocomplete="off" placeholder="ICAO" aria-describedby="bar-hint bar-error">
   </form>
-  <p class="bar-hint" id="bar-hint">Enter a 4-character code for the live report, or paste a whole METAR. Esc closes.</p>
+  <p class="bar-hint" id="bar-hint">Enter a 4-character code for the live report, or paste a whole METAR. <span class="kbd-only">Esc closes.</span><span class="touch-only">Tap outside to close.</span></p>
   <div class="samples" id="samples" role="group" aria-label="Recorded sample reports"></div>
   <p class="bar-error" id="bar-error" role="alert"></p>
+  <button type="button" class="bar-close" id="bar-close">Close</button>
 </div>
 
 <footer class="readout" id="readout">
@@ -46,7 +47,7 @@
   <p class="meta">
     <span id="attribution">METAR · NOAA / NWS Aviation Weather Center · aviationweather.gov</span>
     <button type="button" id="how" aria-haspopup="dialog" aria-controls="notes">How this is drawn</button>
-    <button type="button" id="quality" title="Change render quality">Quality auto</button>
+    <button type="button" id="quality" title="Render quality. Frames per second are measured on this device and capped by its display refresh rate. Click to fix a tier.">Quality auto</button>
   </p>
 </footer>
 
@@ -65,7 +66,7 @@
     <li>Stars are decorative and randomly placed, not a star map. There is no moon yet.</li>
     <li>At night, low cloud and fog get a faint warm glow from below, standing in for airport and city lights. That is an assumption; the report says nothing about it.</li>
     <li>The ground is a plain dark plane, not the real terrain, seen from about 25 m up, roughly a control-tower cab. With a low sun the view faces the sun's side of the sky, so sunrise, sunset and twilight are in frame; with a high sun it faces away, so clouds are lit from the front. The label gives the viewing bearing (VIEW).</li>
-    <li>Text areas are dimmed where the sky is bright so the words stay readable.</li>
+    <li>Where the sky is bright, it is dimmed toward the corner and edge the text sits against, like the shadow of a window frame, so the words stay readable.</li>
   </ul>
   <h3>Sources</h3>
   <ul>

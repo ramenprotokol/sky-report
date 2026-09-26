@@ -123,8 +123,17 @@ export function traceLines(r: Report): string[] {
     const c = m.clouds[l.metarIndex];
     const tok = c ? m.tokens[c.tokenIndex]?.text : undefined;
     const base = l.baseAssumed ? `an assumed ${formatFeet(l.baseM / 0.3048)} (base not measured)` : formatFeet(l.baseM / 0.3048);
+    const amount = `${Math.round(l.coverage * 8 * 10) / 10}/8 of the sky from ${base}`;
+    if (l.squeezed) {
+      const next = s.layers[i + 1];
+      const gapFt = next ? ` (the next base is only ${formatFeet((next.baseM - l.baseM) / 0.3048)} higher)` : '';
+      out.push(
+        `Cloud layer ${i + 1} (${tok ?? '?'}): ${amount}. It is too close under the next layer to draw separately${gapFt}: squeezed to ${Math.round(l.thicknessM)} m, it is barely visible.`,
+      );
+      return;
+    }
     out.push(
-      `Cloud layer ${i + 1} (${tok ?? '?'}): ${Math.round(l.coverage * 8 * 10) / 10}/8 of the sky from ${base}, ${Math.round(l.thicknessM)} m thick, drawn as ${KIND_NAME[l.kind]}. Thickness and shape are style choices; the report gives only amount and base.`,
+      `Cloud layer ${i + 1} (${tok ?? '?'}): ${amount}, ${Math.round(l.thicknessM)} m thick, drawn as ${KIND_NAME[l.kind]}. Thickness and shape are style choices; the report gives only amount and base.`,
     );
   });
   if (s.droppedLayers > 0) out.push(`${s.droppedLayers} higher layer${s.droppedLayers > 1 ? 's are' : ' is'} reported but not drawn (the shader draws up to four).`);
@@ -159,8 +168,10 @@ export function traceLines(r: Report): string[] {
 
   if (s.sun.known && r.obs) {
     const st = r.source.station;
+    const e = s.sun.elevationDeg;
+    const where = e < 0 ? `${deg(-e, 1)} below the horizon` : `${deg(e, 1)} above the horizon`;
     out.push(
-      `Sun: ${deg(s.sun.elevationDeg, 1)} above the horizon at bearing ${Math.round(s.sun.azimuthDeg)}°, from the NOAA solar position equations for ${st?.lat?.toFixed(3)}, ${st?.lon?.toFixed(3)} at ${formatObs(r.obs)}.`,
+      `Sun: ${where} at bearing ${Math.round(s.sun.azimuthDeg)}°, from the NOAA solar position equations for ${st?.lat?.toFixed(3)}, ${st?.lon?.toFixed(3)} at ${formatObs(r.obs)}.`,
     );
   } else {
     out.push('Sun: the station position or time is unknown, so the light is a neutral daylight and no sun disc is drawn.');
@@ -177,6 +188,11 @@ export function tokenExplanation(r: Report, t: MetarToken): string {
   }
   if (t.drives.kind === 'layer' && t.drives.index >= MAX_LAYERS) {
     return t.meaning.replace(/ — drawn as cloud layer \d+$/, ' — not drawn (only the lowest four layers are drawn)');
+  }
+  if (t.drives.kind === 'layer') {
+    const index = t.drives.index;
+    const layer = r.scene.layers.find((l) => l.metarIndex === index);
+    if (layer?.squeezed) return t.meaning.replace(/ — drawn as cloud layer \d+$/, ' — too close under the next layer to draw separately');
   }
   return t.meaning;
 }

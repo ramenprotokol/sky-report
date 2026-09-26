@@ -23,7 +23,7 @@ export function findChrome() {
 
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 
-export async function launch({ width = 1280, height = 800, deviceScaleFactor = 1, mobile = false, reducedMotion = false } = {}) {
+export async function launch({ width = 1280, height = 800, deviceScaleFactor = 1, mobile = false, reducedMotion = false, args = [] } = {}) {
   const chrome = findChrome();
   if (!chrome) throw new Error('Chrome not found (set CHROME_PATH)');
   const profile = await mkdtemp(join(tmpdir(), 'sky-report-chrome-'));
@@ -39,6 +39,7 @@ export async function launch({ width = 1280, height = 800, deviceScaleFactor = 1
       '--hide-scrollbars',
       '--mute-audio',
       '--enable-unsafe-swiftshader',
+      ...args,
       `--window-size=${Math.max(width, 500)},${height}`,
       'about:blank',
     ],

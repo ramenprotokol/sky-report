@@ -4,11 +4,12 @@
  */
 import './styles.css';
 import { SkyRenderer } from './renderer.ts';
+import { blockFor, union, type Block, type Box } from './scrim.ts';
 import { buildReport, labelLines, traceLines, tokenExplanation, focusFor, type Report, type ReportSource } from './report.ts';
 import { fetchLive, LiveError } from './api.ts';
 import { SAMPLES, SAMPLES_RECORDED } from './samples.ts';
 import { sceneUniforms, cameraBasis, FOCUS } from '../scene/mapping.ts';
-import { TIERS, initialTierIndex, tierIndex } from '../scene/quality.ts';
+import { TIERS, initialTierIndex, tierIndex, framesPerSecond } from '../scene/quality.ts';
 import { parseMetar, MAX_METAR_CHARS } from '../metar/parse.ts';
 
 const $ = <T extends HTMLElement>(id: string) => document.getElementById(id) as T;
@@ -29,6 +30,7 @@ const bar = $('bar');
 const barForm = $<HTMLFormElement>('bar-form');
 const input = $<HTMLInputElement>('icao');
 const barError = $('bar-error');
+const barClose = $<HTMLButtonElement>('bar-close');
 const samplesEl = $('samples');
 const notes = $('notes');
 const traceEl = $('trace');
@@ -91,7 +93,16 @@ function startRenderer(): void {
       still: forcedStill || reducedMotion.matches,
       startTier: start,
       lockedTier: qIndex >= 0,
-      onTierChange: () => updateQualityLabel(),
+      probe: params.get('probe') === 'below',
+      probeSpanM: Math.min(1000, Math.max(1, Number(params.get('span')) || 120)) * 1000,
+      onTierChange: () => {
+        frameTimes = [];
+        updateQualityLabel();
+      },
+      onAutoStill: () => {
+        root.dataset.motion = 'still';
+        updateQualityLabel();
+      },
       onFrame: (ms) => {
         frameTimes.push(ms);
         if (frameTimes.length > 60) frameTimes.shift();
@@ -125,39 +136,69 @@ function updateQualityLabel(): void {
   }
   const t = renderer.tier;
   const mode = manualTier === null ? 'auto' : 'fixed';
-  let ms = '';
-  if (!renderer.isStill && frameTimes.length >= 20) {
-    const sorted = [...frameTimes].sort((a, b) => a - b);
-    ms = ` · ${Math.round(sorted[Math.floor(sorted.length / 2)]!)} ms/frame here`;
+  let extra = '';
+  const measuredMs = frameTimes.reduce((a, b) => a + b, 0);
+  if (renderer.isAutoStill) {
+    extra = ' · still: too slow to animate here';
+  } else if (!renderer.isStill && (frameTimes.length >= 20 || (frameTimes.length >= 3 && measuredMs >= 2000))) {
+    // Frames actually shown per second on this device. The display's refresh rate caps it, so
+    // 60 means "keeping up with a 60 Hz screen", not a render time.
+    const fps = framesPerSecond(frameTimes);
+    if (fps !== null) extra = ` · ${fps >= 10 ? Math.round(fps) : fps.toFixed(1)} frames/s here`;
   }
-  qualityBtn.textContent = `Quality ${t.name} (${mode})${ms}`;
+  qualityBtn.textContent = `Quality ${t.name} (${mode})${extra}`;
 }
 
 // ---------------------------------------------------------------- showing a report
 
 const range = document.createRange();
-/** Tight boxes around each piece of text, so the sky is dimmed only right behind words. */
-function textRects(): DOMRect[] {
-  const rects: DOMRect[] = [];
-  const tight = (el: Element | null) => {
+/** Tight boxes around each piece of text, grouped by the block of text they belong to. */
+function textGroups(): { label: DOMRect[]; readout: DOMRect[]; bar: DOMRect[] } {
+  const tight = (out: DOMRect[], el: Element | null) => {
     if (!el || (el as HTMLElement).hidden) return;
     range.selectNodeContents(el);
     const r = range.getBoundingClientRect();
-    if (r.width > 0 && r.height > 0) rects.push(r);
+    if (r.width > 0 && r.height > 0) out.push(r);
   };
-  for (const el of labelEl.querySelectorAll('.ident, .hint, p')) tight(el);
-  tight(explainEl);
-  tight(metarEl);
-  tight(readoutEl.querySelector('.meta'));
-  if (!bar.hidden) rects.push(bar.getBoundingClientRect());
-  return rects;
+  const label: DOMRect[] = [];
+  for (const el of labelEl.querySelectorAll('.ident, .hint, p')) tight(label, el);
+  const readout: DOMRect[] = [];
+  tight(readout, explainEl);
+  tight(readout, metarEl);
+  tight(readout, readoutEl.querySelector('.meta'));
+  const barRects: DOMRect[] = [];
+  if (!bar.hidden) barRects.push(bar.getBoundingClientRect());
+  return { label, readout, bar: barRects };
+}
+
+function textRects(): DOMRect[] {
+  const g = textGroups();
+  return [...g.label, ...g.readout, ...g.bar];
+}
+
+/**
+ * One broad dimming falloff per block of text, anchored to the frame: the label to the top-left
+ * corner, the readout to the bottom edge, the ICAO bar around itself.
+ */
+function textBlocks(): Block[] {
+  const g = textGroups();
+  const vp = { width: innerWidth, height: innerHeight };
+  const blocks: Block[] = [];
+  const add = (rects: DOMRect[], anchor: 'top-left' | 'bottom-left' | 'centre') => {
+    const u = union(rects as Box[]);
+    if (u) blocks.push(blockFor(u, anchor, vp));
+  };
+  add(g.label, 'top-left');
+  add(g.readout, 'bottom-left');
+  add(g.bar, 'centre');
+  return blocks;
 }
 
 // Test hook for the contrast check (only with ?notext, which hides the words but keeps layout).
 if (params.has('notext')) (window as Window & { skyReportTextRects?: () => DOMRect[] }).skyReportTextRects = textRects;
 
 function syncRects(): void {
-  renderer?.setTextRects(textRects());
+  renderer?.setTextBlocks(textBlocks());
 }
 
 function show(report: Report): void {
@@ -182,7 +223,12 @@ function show(report: Report): void {
   setResting(DEFAULT_HINT);
   if (renderer) {
     renderer.setFocus(FOCUS.none, 0);
-    renderer.setScene(sceneUniforms(report.scene), cameraBasis(report.scene.viewHeadingDeg, report.scene.viewPitchDeg));
+    const uniforms = sceneUniforms(report.scene);
+    // Calibration hook (npm run calibrate): with the below-view probe, force the first layer's
+    // drawn coverage to a raw value.
+    const raw = Number(params.get('rawcover'));
+    if (params.get('probe') === 'below' && params.has('rawcover') && raw >= 0 && raw <= 1) (uniforms.uLayers as number[])[2] = raw;
+    renderer.setScene(uniforms, cameraBasis(report.scene.viewHeadingDeg, report.scene.viewPitchDeg));
   }
   syncRects();
   root.dataset.station = L.ident;
@@ -376,9 +422,30 @@ barForm.addEventListener('submit', async (e) => {
   if (ok) closeBar();
 });
 
-identBtn.addEventListener('click', () => openBar(''));
+identBtn.addEventListener('click', () => (bar.hidden ? openBar('') : closeBar()));
+barClose.addEventListener('click', () => closeBar());
+
+// A tap or click anywhere outside the open bar closes it (touch screens have no Escape key).
+// The same press must not then reopen it through the sky's own click handler.
+let swallowSkyClick = false;
+document.addEventListener(
+  'pointerdown',
+  (e) => {
+    swallowSkyClick = false;
+    if (bar.hidden) return;
+    const t = e.target as Node | null;
+    if (t && (bar.contains(t) || identBtn.contains(t))) return;
+    closeBar();
+    swallowSkyClick = t === canvas;
+  },
+  true,
+);
 canvas.addEventListener('click', () => {
-  if (notes.hidden) openBar('');
+  if (swallowSkyClick) {
+    swallowSkyClick = false;
+    return;
+  }
+  if (notes.hidden && bar.hidden) openBar('');
 });
 
 // ---------------------------------------------------------------- notes
@@ -405,12 +472,9 @@ qualityBtn.addEventListener('click', () => {
   if (manualTier === null) manualTier = 0;
   else if (manualTier < TIERS.length - 1) manualTier += 1;
   else manualTier = null;
-  if (manualTier === null) {
-    renderer.controller.locked = false;
-    renderer.controller.reset();
-  } else {
-    renderer.setTier(manualTier);
-  }
+  if (manualTier === null) renderer.setAuto();
+  else renderer.setTier(manualTier);
+  root.dataset.motion = renderer.isStill ? 'still' : 'moving';
   frameTimes = [];
   updateQualityLabel();
 });
@@ -445,7 +509,7 @@ document.addEventListener('keydown', (e) => {
 
 reducedMotion.addEventListener('change', () => {
   renderer?.setStill(forcedStill || reducedMotion.matches);
-  root.dataset.motion = forcedStill || reducedMotion.matches ? 'still' : 'moving';
+  root.dataset.motion = renderer?.isStill ? 'still' : 'moving';
   updateQualityLabel();
 });
 

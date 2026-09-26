@@ -10,6 +10,8 @@
 //   4. adds stars at night, the sun disc, precipitation streaks and the token highlight,
 //   5. tone-maps, limits brightness behind text for contrast, and dithers.
 // Scene values are computed in src/scene/mapping.ts; nothing here reads the METAR directly.
+// The sky's diffuse light (uSkyAmbient) depends only on the sun, so src/scene/atmosphere.ts
+// computes it once per scene with a TypeScript port of skyScatter below.
 precision highp float;
 precision highp int;
 precision highp sampler3D;
@@ -36,19 +38,22 @@ uniform float uGust;
 uniform float uHazeBeta;      // 1/m at the ground
 uniform float uHazeHeight;    // m
 uniform vec3 uHazeTint;
-uniform float uObscured;
+uniform float uObscured;      // 1 when the report gives VV (sky obscured)
 uniform vec2 uPrecip;         // kind (0 none, 1 rain, 2 snow), intensity
 uniform vec3 uSunDir;         // x east, y up, z north
 uniform float uSunKnown;
 uniform float uExposure;
+uniform vec3 uSkyAmbient;     // diffuse sky light for this sun (atmosphere.ts)
 
 // Interaction and legibility (renderer)
 uniform int uFocus;           // FOCUS in mapping.ts
 uniform int uFocusIndex;
 uniform float uFocusAmount;
-uniform vec4 uTextRects[12];  // backing pixels, x0 y0 x1 y1, y up
-uniform int uTextRectCount;
+uniform vec4 uTextBlocks[3];  // backing pixels, y up: centre x, y and radii x, y of each text block
+uniform int uTextBlockCount;
 uniform float uLumaLimit;     // max relative luminance behind text
+uniform int uProbe;           // test hook: 1 = look straight up from below, write cloud opacity
+uniform float uProbeSpan;     // width of the ground square the probe covers, m
 
 const float PI = 3.14159265359;
 const float R_EARTH = 6371000.0;
@@ -176,15 +181,6 @@ vec3 skyScatter(vec3 rd, int steps, float jitter) {
   return sum * SUN_E + ms * (1.0 - exp(-odView));
 }
 
-// Diffuse light a cloud or the ground receives from the open sky (a cheap average of three directions).
-vec3 skyAmbient() {
-  vec3 side = normalize(vec3(uSunDir.x, 0.0, uSunDir.z) + vec3(1e-4, 0.0, 0.0));
-  vec3 a = skyScatter(vec3(0.0, 1.0, 0.0), 6, 0.5);
-  vec3 b = skyScatter(normalize(side + vec3(0.0, 0.45, 0.0)), 6, 0.5);
-  vec3 c = skyScatter(normalize(-side + vec3(0.0, 0.45, 0.0)), 6, 0.5);
-  return (a * 0.5 + b * 0.25 + c * 0.25) + NIGHT_SKY * 0.6;
-}
-
 // ---------------------------------------------------------------- clouds
 
 float trapCdf(float s) {
@@ -238,22 +234,33 @@ float cloudDensity(vec2 xz, float h, int layer, bool cheap, float lod) {
     vec2 w = length(uDrift) > 0.01 ? normalize(uDrift) : vec2(1.0, 0.0);
     p = vec2(dot(p, w) * 0.25, dot(p, vec2(-w.y, w.x)));
   }
-  float seed = float(layer) * 0.37 + 0.11;
-  vec3 q = vec3(p / cs, (h / cs) * 1.3 + seed);
+  // Each layer reads its own part of the (tileable) noise, shifted sideways, not up: every layer of
+  // a style then samples the same range of heights, so one calibration per style holds whatever
+  // the layer's altitude or position in the report (see DRAWN_COVERAGE in mapping.ts).
+  vec2 off = vec2(0.37, 0.61) * float(layer);
+  // How much the noise changes from the layer's base to its top, as a fraction of its period.
+  // Fixed per style (not per metre), so column coverage does not depend on the drawn thickness.
+  float zSpan = kind == 4 ? 0.3 : (kind == 3 ? 0.2 : (kind == 1 ? 0.12 : (kind == 2 ? 0.22 : 0.25)));
+  vec3 q = vec3(p / cs + off, 0.11 + hf * zSpan);
   lod = min(lod, 2.5); // deeper mips average the noise toward 0.5 and would change the coverage
   vec4 base = textureLod(uNoise, q, lod);
-  float big = textureLod(uNoise, vec3(p / (cs * 4.7), seed * 3.1), max(0.0, lod - 2.0)).b;
-  // The noise channels are equalised (uniform on [0,1]); 0.7·R + 0.3·B has a trapezoidal
-  // distribution, and trapCdf maps it back to uniform. So keeping u > 1 − coverage covers
-  // that fraction of the layer: FEW 1.5/8, SCT 3.5/8, BKN 6/8, OVC all.
+  float big = textureLod(uNoise, vec3(p / (cs * 4.7) + off.yx, 0.34), max(0.0, lod - 2.0)).b;
+  // The noise channels are equalised slice by slice (uniform on [0,1] in every horizontal plane);
+  // 0.7·R + 0.3·B has a trapezoidal distribution, and trapCdf maps it back to uniform. So keeping
+  // u > 1 − c covers a fraction c of any one plane through the layer. Seen from below, a thick
+  // layer shows the union of its planes, so mapping.ts passes a calibrated c (DRAWN_COVERAGE)
+  // that makes the whole column cover the reported amount: FEW 1.5/8, SCT 3.5/8, BKN 6/8, OVC all.
   float u = trapCdf(0.7 * base.r + 0.3 * big);
   float w = 0.12 + 0.3 * cover; // edge softness
   float d = saturate((u - (1.0 - cover)) / w);
   float hs = heightShape(hf, kind);
   d = saturate(remap(d, 1.0 - hs, 1.0, 0.0, 1.0)); // round the tops, flatten the bases
-  if (cover >= 0.999) d = max(d, 0.3 * hs * (0.6 + 0.4 * base.g));
+  // Overcast: a continuous sheet under the texture (a thicker veil for thin cirrostratus).
+  if (cover >= 0.999) d = max(d, (kind == 3 ? 0.6 : 0.3) * hs * (0.6 + 0.4 * base.g));
   if (d <= 0.0 || cheap) return d;
-  float detail = textureLod(uNoise, q * 5.3, lod + 2.4).a;
+  // Detail erosion keeps its own, roughly isotropic, 3D coordinates so the edges billow in every
+  // direction (it only ever removes density, so it cannot add cover).
+  float detail = textureLod(uNoise, vec3(p / cs + off, h * 1.3 / cs) * 5.3, lod + 2.4).a;
   float erode = mix(detail, 1.0 - detail, saturate(hf * 3.0)) * 0.35 * saturate(1.2 - lod * 0.35);
   return saturate(remap(d, erode, 1.0, 0.0, 1.0));
 }
@@ -279,7 +286,8 @@ float lightOD(vec2 xz, float h, int layer, int kind, float lod) {
 
 struct Clouds { vec3 light; float trans; float depth; };
 
-Clouds marchClouds(vec3 rd, vec3 ambient, vec3 ambientBelow, vec3 glow, float jitter, float pixelAngle) {
+// roXZ shifts the ray's start sideways (only the coverage probe uses it; the camera is at 0).
+Clouds marchClouds(vec2 roXZ, vec3 rd, vec3 ambient, vec3 ambientBelow, vec3 glow, float jitter, float pixelAngle) {
   Clouds res = Clouds(vec3(0.0), 1.0, 0.0);
   if (rd.y <= 0.0) return res;
   float cosT = dot(rd, uSunDir);
@@ -320,7 +328,7 @@ Clouds marchClouds(vec3 rd, vec3 ambient, vec3 ambientBelow, vec3 glow, float ji
       float dt = fine ? dtFine : dtCoarse;
       vec3 pos = rd * t;
       float h = altAt(EYE, rd.y, t);
-      vec2 xz = pos.xz;
+      vec2 xz = roXZ + pos.xz;
       float lod = log2(max(1.0, max(t * pixelAngle, dt * 0.5) / texelM));
       if (!fine) {
         if (cloudDensity(xz, h, li, true, lod) > 0.0) {
@@ -448,10 +456,13 @@ vec3 tonemap(vec3 x) {
   return 1.0 - exp(-x);
 }
 
-float rectMask(vec2 frag, vec4 r, float feather) {
-  vec2 d = max(r.xy - frag, frag - r.zw);
-  float dist = length(max(d, 0.0));
-  return 1.0 - smoothstep(0.0, feather, dist);
+// One broad falloff per text block: a squircle (|x|³ + |y|³ = 1) centred on a screen corner or
+// edge, sized (in scrim.ts) so the whole block sits inside its full-strength part, then fading
+// out by twice that radius. Anchored to the frame, it reads as a window's vignette, not a card.
+float blockMask(vec2 frag, vec4 b) {
+  vec3 d = vec3(abs(frag - b.xy) / max(b.zw, vec2(1.0)), 0.0);
+  float r = pow(d.x * d.x * d.x + d.y * d.y * d.y, 1.0 / 3.0);
+  return 1.0 - smoothstep(1.0, 2.0, r);
 }
 
 void main() {
@@ -462,12 +473,22 @@ void main() {
   float pixelAngle = 2.0 * uTanHalfFov / uResolution.y;
   float jitter = hash3(vec3(frag, 11.0)).x;
 
+  if (uProbe == 1) {
+    // Test hook (?probe=below): an orthographic view straight up from under a square uProbeSpan
+    // wide, writing cloud opacity. The smoke test uses it to measure the cover each report gives.
+    vec2 off = (frag / uResolution - 0.5) * uProbeSpan;
+    Clouds cp = marchClouds(off, vec3(0.0, 1.0, 0.0), vec3(0.0), vec3(0.0), vec3(0.0), jitter, 0.0);
+    outColor = vec4(vec3(1.0 - cp.trans), 1.0);
+    return;
+  }
+
   float cosT = dot(rd, uSunDir);
-  vec3 ambient = skyAmbient();
+  vec3 ambient = uSkyAmbient;
 
   // Mean-field cloud shading of the world below the clouds: more cover, less direct sun.
+  // VV (sky obscured) counts as a full deck: the fog hides the sky and lights everything grey.
   float shade = 1.0;
-  float maxCover = 0.0;
+  float maxCover = uObscured;
   for (int i = 0; i < 4; i++) {
     if (i >= uLayerCount) break;
     float c = uLayers[i].z;
@@ -481,10 +502,23 @@ void main() {
   float night = smoothstep(-0.02, -0.12, uSunDir.y);
   vec3 glow = GROUND_GLOW * night;
 
-  // Deep fog hides the sun's direct beam.
-  float fogSun = exp(-uHazeBeta * uHazeHeight / max(uSunDir.y, 0.05));
-  // Single scattering in the haze: direct sun through a forward-peaked phase function, plus sky light.
-  vec3 fogLight = uHazeTint * (sunGround * fogSun * hg(cosT, 0.6) + ambientBelow * 0.85) + glow * 0.8;
+  // Vertical optical depth of the haze or fog column (β·H). Deep fog hides the sun's direct beam.
+  float fogTau = uHazeBeta * uHazeHeight;
+  float fogSun = exp(-fogTau / max(uSunDir.y, 0.05));
+  // How much of the light in the haze has been scattered more than once: with scattering events
+  // Poisson-distributed along optical depth τ, P(two or more) = 1 − (1 + τ)e^−τ. About 0 in clear
+  // air, 0.1 in a 4.5 km haze, 0.98 in VV fog. Multiply scattered light has lost the sky's blue
+  // (droplets scatter every colour alike), so sky light fades toward its own grey as fog deepens.
+  float multi = 1.0 - (1.0 + fogTau) * exp(-fogTau);
+  vec3 fogAmbient = mix(ambientBelow, vec3(luma(ambientBelow)), multi);
+  // Sunlight that diffuses down through the fog: the two-stream transmission of a non-absorbing,
+  // forward-scattering layer (g ≈ 0.85), 1 / (1 + ¾(1 − g)τ). Spread over all directions and
+  // with about half lost into the dark ground, its radiance is E·T / 2π. This keeps daytime fog
+  // bright white-grey instead of dark or sky-blue.
+  vec3 sunTopOfFog = sunlightAt(uHazeHeight) * shade * smoothstep(-0.01, 0.02, uSunDir.y);
+  vec3 sunDiffuse = sunTopOfFog * max(uSunDir.y, 0.0) / (1.0 + 0.1125 * fogTau) / (2.0 * PI);
+  // Haze light: direct sun through a forward-peaked phase function, sky light, and the diffuse sun.
+  vec3 fogLight = uHazeTint * (sunGround * fogSun * hg(cosT, 0.6) + fogAmbient * 0.85 + sunDiffuse * multi) + glow * 0.8;
 
   vec3 col;
   float tHit;
@@ -519,7 +553,7 @@ void main() {
   }
 
   // Clouds in front of the sky.
-  Clouds cl = marchClouds(rd, ambient, ambientBelow, glow, jitter, pixelAngle);
+  Clouds cl = marchClouds(vec2(0.0), rd, ambient, ambientBelow, glow, jitter, pixelAngle);
   float cloudAlpha = 1.0 - cl.trans;
 
   // Haze between the camera and whatever the ray reaches.
@@ -574,19 +608,18 @@ void main() {
 
   // Legibility: behind text, compress relative luminance so it never exceeds uLumaLimit
   // (WCAG contrast is computed on these linear values). The compression is smooth and fades
-  // out over a wide margin, so it reads as a vignette rather than a box.
+  // out over a wide margin from the frame's edge, so it reads as a vignette rather than a box.
   float m = 0.0;
-  float feather = 60.0 * uResolution.y / 800.0;
-  for (int i = 0; i < 12; i++) {
-    if (i >= uTextRectCount) break;
-    m = max(m, rectMask(frag, uTextRects[i], feather));
+  for (int i = 0; i < 3; i++) {
+    if (i >= uTextBlockCount) break;
+    m = max(m, blockMask(frag, uTextBlocks[i]));
   }
   float Y = luma(mapped);
   if (m > 0.0 && Y > 1e-5) {
-    // Inside the text box (m = 1) this is ≤ uLumaLimit for any Y; outside it fades to no change.
-    float Yc = uLumaLimit * (1.0 - exp(-Y / uLumaLimit));
-    float Yout = mix(Y, min(Y, Yc), m * m * (3.0 - 2.0 * m));
-    mapped *= Yout / Y;
+    // Inside a block (m = 1) this is ≤ uLumaLimit for any Y; outside it fades to no change. The
+    // fade is in stops (log luminance), like a lens vignette, so no edge shows.
+    float Yc = min(Y, uLumaLimit * (1.0 - exp(-Y / uLumaLimit)));
+    mapped *= pow(Yc / Y, m);
   }
 
   // Exact sRGB encoding, so the displayed luminance equals `mapped` (what the limit above assumes).

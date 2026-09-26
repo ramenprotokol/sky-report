@@ -7,32 +7,18 @@ import skySrc from '../shaders/sky.frag';
 import noiseSrc from '../shaders/noise.frag';
 import { TIERS, TierController, backingSize, type Tier } from '../scene/quality.ts';
 import type { UniformValue } from '../scene/mapping.ts';
+import type { Block } from './scrim.ts';
+import { equaliseSlices } from './equalise.ts';
 
 const NOISE_SIZE = 64;
-export const MAX_TEXT_RECTS = 12;
+export const MAX_TEXT_BLOCKS = 3;
+/** Width of the ground square the coverage probe (?probe=below) looks up from, m. */
+export const PROBE_SPAN_M = 120_000;
 /**
  * Relative luminance cap for the sky behind text. With --ink (L≈0.86) that is ≥ 6:1 and with
  * --ink-2 (L≈0.67) ≥ 4.7:1, so body and caption text meet WCAG AA whatever the sky does.
  */
 export const LUMA_LIMIT = 0.1;
-
-/** In-place histogram equalisation of each RGBA channel. */
-export function equalise(data: Uint8Array): void {
-  const n = data.length / 4;
-  for (let c = 0; c < 4; c++) {
-    const hist = new Uint32Array(256);
-    for (let i = c; i < data.length; i += 4) hist[data[i]!]! += 1;
-    const lut = new Uint8Array(256);
-    let acc = 0;
-    for (let v = 0; v < 256; v++) {
-      const h = hist[v]!;
-      // Map each value to the middle of its rank range.
-      lut[v] = Math.min(255, Math.round(((acc + h / 2) / n) * 255));
-      acc += h;
-    }
-    for (let i = c; i < data.length; i += 4) data[i] = lut[data[i]!]!;
-  }
-}
 
 interface UniformSlot {
   loc: WebGLUniformLocation;
@@ -45,8 +31,14 @@ export interface RendererOptions {
   startTier: number;
   lockedTier: boolean;
   onTierChange?: (tier: Tier, index: number) => void;
+  /** The cheapest tier was still too slow to animate, so the renderer switched to still mode. */
+  onAutoStill?: () => void;
   onFrame?: (ms: number) => void;
   onDraw?: () => void;
+  /** Test hook: draw cloud opacity seen straight up from below instead of the sky. */
+  probe?: boolean;
+  /** Width of the ground square the probe covers, m. */
+  probeSpanM?: number;
 }
 
 export class SkyRenderer {
@@ -60,13 +52,16 @@ export class SkyRenderer {
   private raf = 0;
   private lastFrame = 0;
   private time = 0;
+  /** Still because the viewer asked (reduced motion, ?still). */
   private still: boolean;
+  /** Still because this device is too slow to animate even the cheapest tier. */
+  private autoStill = false;
   private dirty = true;
   private focusTarget = 0;
   private focusAmount = 0;
   private cssW = 1;
   private cssH = 1;
-  private textRects: DOMRect[] = [];
+  private textBlocks: Block[] = [];
   readonly controller: TierController;
   private opts: RendererOptions;
   private camera: number[] = [1, 0, 0, 0, 1, 0, 0, 0, 1];
@@ -86,6 +81,11 @@ export class SkyRenderer {
     this.sky = this.program(vertSrc, skySrc);
     this.noise = this.buildNoise();
     this.collectUniforms();
+    // A hidden tab gets no frames; the first interval back would be the whole time away.
+    document.addEventListener('visibilitychange', () => {
+      this.lastFrame = 0;
+      this.controller.reset();
+    });
   }
 
   private compile(type: number, src: string): WebGLShader {
@@ -138,9 +138,10 @@ export class SkyRenderer {
     gl.bindFramebuffer(gl.FRAMEBUFFER, null);
     gl.deleteFramebuffer(fb);
     gl.deleteProgram(prog);
-    // Histogram-equalise each channel so its values are uniform on [0, 1]. Then "keep the top
-    // c of the noise" covers a fraction c of the sky, which is how coverage is applied.
-    equalise(voxels);
+    // Histogram-equalise each channel, slice by slice, so its values are uniform on [0, 1] in
+    // every horizontal plane. Then "keep the top c of the noise" covers a fraction c of the sky,
+    // which is how coverage is applied (measured from below by the smoke test).
+    equaliseSlices(voxels, NOISE_SIZE * NOISE_SIZE);
     gl.texSubImage3D(gl.TEXTURE_3D, 0, 0, 0, 0, NOISE_SIZE, NOISE_SIZE, NOISE_SIZE, gl.RGBA, gl.UNSIGNED_BYTE, voxels);
     gl.generateMipmap(gl.TEXTURE_3D);
     gl.texParameteri(gl.TEXTURE_3D, gl.TEXTURE_MIN_FILTER, gl.LINEAR_MIPMAP_LINEAR);
@@ -202,18 +203,18 @@ export class SkyRenderer {
     if (kind === 0) {
       this.focusTarget = 0;
     } else {
-      if (prevKind !== kind || this.values.get('uFocusIndex') !== index) this.focusAmount = this.still ? 1 : Math.min(this.focusAmount, 0.2);
+      if (prevKind !== kind || this.values.get('uFocusIndex') !== index) this.focusAmount = this.isStill ? 1 : Math.min(this.focusAmount, 0.2);
       this.values.set('uFocus', kind);
       this.values.set('uFocusIndex', index);
       this.focusTarget = 1;
     }
-    if (this.still) this.focusAmount = this.focusTarget;
-    if (kind === 0 && this.still) this.values.set('uFocus', 0);
+    if (this.isStill) this.focusAmount = this.focusTarget;
+    if (kind === 0 && this.isStill) this.values.set('uFocus', 0);
     this.invalidate();
   }
 
-  setTextRects(rects: DOMRect[]): void {
-    this.textRects = rects.slice(0, MAX_TEXT_RECTS);
+  setTextBlocks(blocks: Block[]): void {
+    this.textBlocks = blocks.slice(0, MAX_TEXT_BLOCKS);
     this.invalidate();
   }
 
@@ -222,9 +223,19 @@ export class SkyRenderer {
     this.invalidate();
   }
 
+  /** A manual tier: the automatic controller stops, and animation is tried again at that tier. */
   setTier(index: number): void {
     this.controller.lock(index);
+    this.autoStill = false;
     this.resize();
+  }
+
+  /** Back to automatic quality. */
+  setAuto(): void {
+    this.controller.unlock();
+    this.autoStill = false;
+    this.lastFrame = 0;
+    this.invalidate();
   }
 
   get tier(): Tier {
@@ -258,7 +269,8 @@ export class SkyRenderer {
     this.raf = 0;
     const dt = this.lastFrame ? ts - this.lastFrame : 0;
     this.lastFrame = ts;
-    if (!this.still) {
+    const still = this.isStill;
+    if (!still) {
       this.time += Math.min(dt, 100) / 1000;
       // Ease the highlight in and out.
       const k = 1 - Math.exp(-Math.min(dt, 100) / 90);
@@ -269,17 +281,27 @@ export class SkyRenderer {
       }
       if (dt > 0) {
         this.opts.onFrame?.(dt);
-        const change = this.controller.sample(dt);
-        if (change !== null) {
+        const decision = this.controller.sample(dt);
+        if (decision?.kind === 'tier') {
           this.resize();
-          this.opts.onTierChange?.(TIERS[change]!, change);
+          this.opts.onTierChange?.(TIERS[decision.index]!, decision.index);
+        } else if (decision?.kind === 'still') {
+          // Last resort: even the cheapest tier is too slow to animate here. Draw only on change.
+          this.autoStill = true;
+          this.focusAmount = this.focusTarget;
+          if (this.focusTarget === 0) this.values.set('uFocus', 0);
+          this.dirty = true;
+          this.opts.onAutoStill?.();
         }
       }
     }
-    if (this.still && !this.dirty) return;
+    if (this.isStill && !this.dirty) {
+      this.lastFrame = 0;
+      return;
+    }
     this.draw();
     this.dirty = false;
-    if (!this.still) this.schedule();
+    if (!this.isStill) this.schedule();
     else this.lastFrame = 0;
   }
 
@@ -300,9 +322,9 @@ export class SkyRenderer {
 
     const sx = w / this.cssW;
     const sy = h / this.cssH;
-    const rects: number[] = [];
-    for (const r of this.textRects) rects.push(r.left * sx, h - r.bottom * sy, r.right * sx, h - r.top * sy);
-    while (rects.length < MAX_TEXT_RECTS * 4) rects.push(0, 0, 0, 0);
+    const blocks: number[] = [];
+    for (const b of this.textBlocks) blocks.push(b.cx * sx, h - b.cy * sy, b.rx * sx, b.ry * sy);
+    while (blocks.length < MAX_TEXT_BLOCKS * 4) blocks.push(0, 0, 1, 1);
 
     const frameValues: Record<string, UniformValue> = {
       uResolution: [w, h],
@@ -314,9 +336,11 @@ export class SkyRenderer {
       uSkySteps: tier.skySteps,
       uNoise: 0,
       uFocusAmount: this.focusAmount,
-      uTextRects: rects,
-      uTextRectCount: this.textRects.length,
+      uTextBlocks: blocks,
+      uTextBlockCount: this.textBlocks.length,
       uLumaLimit: LUMA_LIMIT,
+      uProbe: this.opts.probe ? 1 : 0,
+      uProbeSpan: this.opts.probeSpanM ?? PROBE_SPAN_M,
     };
     if (!this.values.has('uFocus')) this.values.set('uFocus', 0);
     if (!this.values.has('uFocusIndex')) this.values.set('uFocusIndex', -1);
@@ -327,7 +351,12 @@ export class SkyRenderer {
   }
 
   get isStill(): boolean {
-    return this.still;
+    return this.still || this.autoStill;
+  }
+
+  /** True when still mode was forced by slow frames rather than asked for. */
+  get isAutoStill(): boolean {
+    return this.autoStill && !this.still;
   }
 
   /** Current backing-store size, for the status line. */

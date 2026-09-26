@@ -68,6 +68,25 @@ describe('trace lines ("How this is drawn")', () => {
     assert.ok(lines.some((l) => /no sun disc is drawn/.test(l)));
   });
 
+  test('a night sun is described as below the horizon, not "−41.6° above"', () => {
+    const lines = traceLines(buildReport(sample('KJFK'), 'sample', NOW));
+    const sun = lines.find((l) => l.startsWith('Sun:'))!;
+    assert.match(sun, /^Sun: 41\.\d° below the horizon at bearing \d+°/);
+    assert.ok(!/−/.test(sun));
+  });
+
+  test('a layer squeezed under the next one says it is too close to draw separately', () => {
+    const r = buildReport({ id: 'EGXX', raw: 'METAR EGXX 260650Z 24010KT 9999 FEW004 BKN005 12/10 Q1010', obsTime: null, station: null }, 'pasted', NOW);
+    assert.equal(r.scene.layers[0]!.squeezed, true);
+    const lines = traceLines(r);
+    assert.match(lines[0]!, /^Cloud layer 1 \(FEW004\): 1\.5\/8 of the sky from 400 ft\. It is too close under the next layer to draw separately \(the next base is only 100 ft higher\): squeezed to \d+ m, it is barely visible\.$/);
+    assert.ok(!/drawn as/.test(lines[0]!));
+    assert.match(lines[1]!, /^Cloud layer 2 \(BKN005\): .* drawn as/);
+    const tok = r.metar.tokens.find((t) => t.text === 'FEW004')!;
+    assert.match(tokenExplanation(r, tok), /too close under the next layer to draw separately$/);
+    assert.doesNotMatch(tokenExplanation(r, tok), /drawn as cloud layer/);
+  });
+
   test('dropped layers are admitted', () => {
     const lines = traceLines(
       buildReport({ id: 'CYVR', raw: 'METAR CYVR 260500Z 21007KT 6SM -SHRA FEW011 FEW027 SCT042 BKN057 OVC068 12/12 A3001', obsTime: null, station: null }, 'pasted', NOW),

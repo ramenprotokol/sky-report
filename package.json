@@ -16,7 +16,8 @@
     "test:smoke": "node --test \"tests/smoke/*.test.mjs\"",
     "serve": "node scripts/serve.mjs",
     "dev": "npm run build && wrangler dev",
-    "shots": "node scripts/shots.mjs"
+    "shots": "node scripts/shots.mjs",
+    "calibrate": "node scripts/calibrate-cover.mjs"
   },
   "devDependencies": {
     "@types/node": "^22.20.4",
