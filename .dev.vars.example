@@ -1,0 +1,4 @@
+# Copy to .dev.vars (gitignored). Cloudflare credentials for THIS project, on the Ramen account.
+# These override the global wrangler login, keeping every deploy on ramenprotokol.
+CLOUDFLARE_ACCOUNT_ID=
+CLOUDFLARE_API_TOKEN=
