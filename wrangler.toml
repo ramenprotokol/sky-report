@@ -1,0 +1,11 @@
+# Cloudflare Worker with static assets: dist/ is served as static files (free, not counted
+# against Worker requests); only /api/* runs the Worker. Build first: npm run build.
+# Local: npm run dev (wrangler dev). Deploy: see README (the owner uses a guarded script).
+name = "sky-report"
+main = "worker/index.ts"
+compatibility_date = "2025-09-01"
+
+[assets]
+directory = "./dist"
+binding = "ASSETS"
+run_worker_first = ["/api/*"]
