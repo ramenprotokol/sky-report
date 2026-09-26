@@ -16,17 +16,26 @@ const TYPES = {
   '.json': 'application/json; charset=utf-8',
 };
 
-function parseHeaders(text) {
+/**
+ * Parse a Cloudflare `_headers` file: a path pattern on its own line, then indented
+ * `Name: value` lines, or `! Name` to detach a header set by an earlier matching rule.
+ */
+export function parseHeaders(text) {
   const rules = [];
   let cur = null;
   for (const line of text.split('\n')) {
-    if (!line.trim()) continue;
+    if (!line.trim() || line.trim().startsWith('#')) continue;
     if (!/^\s/.test(line)) {
-      cur = { pattern: line.trim(), headers: {} };
+      cur = { pattern: line.trim(), set: [], detach: [] };
       rules.push(cur);
     } else if (cur) {
-      const i = line.indexOf(':');
-      cur.headers[line.slice(0, i).trim().toLowerCase()] = line.slice(i + 1).trim();
+      const t = line.trim();
+      if (t.startsWith('!')) {
+        cur.detach.push(t.slice(1).trim().toLowerCase());
+        continue;
+      }
+      const i = t.indexOf(':');
+      cur.set.push([t.slice(0, i).trim().toLowerCase(), t.slice(i + 1).trim()]);
     }
   }
   return rules;
@@ -35,6 +44,22 @@ function parseHeaders(text) {
 function matches(pattern, path) {
   if (pattern.endsWith('*')) return path.startsWith(pattern.slice(0, -1));
   return path === pattern;
+}
+
+/**
+ * The headers Cloudflare would send for a path: every matching rule applies, in file order.
+ * A header set by more than one rule is joined with ", " (as Cloudflare documents), and
+ * `! Name` removes what earlier rules set. So a catch-all `Cache-Control: no-cache` plus a
+ * long cache on /assets/* really does give "no-cache, public, max-age=…" — tests catch that.
+ */
+export function headersFor(rules, path) {
+  const out = {};
+  for (const r of rules) {
+    if (!matches(r.pattern, path)) continue;
+    for (const name of r.detach) delete out[name];
+    for (const [name, value] of r.set) out[name] = name in out ? `${out[name]}, ${value}` : value;
+  }
+  return out;
 }
 
 export async function startServer(dir, port = 0) {
@@ -62,7 +87,7 @@ export async function startServer(dir, port = 0) {
         return;
       }
       const headers = { 'content-type': TYPES[extname(file)] ?? 'application/octet-stream' };
-      for (const r of rules) if (matches(r.pattern, url.pathname)) Object.assign(headers, r.headers);
+      Object.assign(headers, headersFor(rules, url.pathname));
       res.writeHead(200, headers).end(await readFile(file));
     } catch {
       res.writeHead(500).end();
