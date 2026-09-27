@@ -373,6 +373,9 @@ function closeBar(): void {
   bar.hidden = true;
   identBtn.setAttribute('aria-expanded', 'false');
   syncRects();
+  // Focus left inside the hidden bar would keep taking keystrokes until the browser notices,
+  // and focusing the page body (the usual restoreFocus) does not move it.
+  if (document.activeElement instanceof HTMLElement && bar.contains(document.activeElement)) document.activeElement.blur();
   (restoreFocus?.isConnected ? restoreFocus : identBtn).focus({ preventScroll: true });
 }
 
