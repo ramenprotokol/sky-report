@@ -2,6 +2,8 @@
 
 **Type an airport code; see the real current sky, ray-marched from the live weather report.**
 
+**Live:** https://sky-report-9t3.pages.dev
+
 ![The sky over Hong Kong International, drawn from a recorded METAR, with the FEW020 group highlighted](docs/screenshot.png)
 
 sky-report takes a METAR, the standard weather report every airport publishes about twice an hour, and draws the sky it describes. The cloud layers sit at the reported heights and amounts, the haze comes from the reported visibility, the clouds drift with the reported wind, and the sun sits where it really was for that airport at the time of the observation. The raw report stays at the bottom of the screen like a cockpit readout. Point at any group in it and it tells you what the group means and lights up what it drives in the picture.
