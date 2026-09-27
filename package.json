@@ -16,6 +16,7 @@
     "test:smoke": "node --test \"tests/smoke/*.test.mjs\"",
     "serve": "node scripts/serve.mjs",
     "dev": "npm run build && wrangler dev",
+    "dev:pages": "npm run build && wrangler pages dev dist",
     "shots": "node scripts/shots.mjs",
     "calibrate": "node scripts/calibrate-cover.mjs"
   },

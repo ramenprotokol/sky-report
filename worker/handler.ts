@@ -31,9 +31,10 @@ interface MemoryEntry {
 }
 
 /**
- * A small per-isolate cache in memory, in front of the Cache API. The Cache API only works for
- * a Worker on a custom domain or route (not on *.workers.dev), and is per data centre; this one
- * needs no setup, but lives only as long as one Worker isolate and is not shared between them.
+ * A small per-isolate cache in memory, behind the Cache API. Cloudflare documents the Cache API
+ * as working for a Worker on a custom domain or route and for Pages Functions (on *.pages.dev
+ * too), not on *.workers.dev, and it is per data centre. This one needs no setup, but lives only
+ * as long as one isolate and is not shared between them.
  * Bounded: when full, the oldest entry goes. Entries expire after CACHE_SECONDS.
  */
 export class MemoryCache {

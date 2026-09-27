@@ -16,5 +16,5 @@
     "skipLibCheck": true,
     "resolveJsonModule": true
   },
-  "include": ["src", "worker", "tests"]
+  "include": ["src", "worker", "functions", "tests"]
 }

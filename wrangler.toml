@@ -1,6 +1,8 @@
 # Cloudflare Worker with static assets: dist/ is served as static files (free, not counted
 # against Worker requests); only /api/* runs the Worker. Build first: npm run build.
 # Local: npm run dev (wrangler dev). Deploy: see README (the owner uses a guarded script).
+# The live site is Cloudflare Pages instead: functions/ serves /api/* there, with the same
+# handler. Wrangler's `pages` commands skip this file (it has no pages_build_output_dir).
 name = "sky-report"
 main = "worker/index.ts"
 compatibility_date = "2025-09-01"
