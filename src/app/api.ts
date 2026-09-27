@@ -45,8 +45,10 @@ export async function fetchLive(id: string, timeoutMs = 9000): Promise<ReportSou
   } finally {
     clearTimeout(timer);
   }
+  // Not the API's JSON: a static host with no API, a Pages site over its daily Functions
+  // allowance, or a platform error page. All mean "no live data here right now".
   if (!(res.headers.get('content-type') ?? '').includes('application/json')) {
-    throw new LiveError('unavailable', 'Live reports need the sky-report Worker, which is not running on this server.');
+    throw new LiveError('unavailable', 'The live report service is not available on this server right now.');
   }
   let body: unknown;
   try {

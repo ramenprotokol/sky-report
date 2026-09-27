@@ -158,6 +158,66 @@ describe('in headless Chrome', { skip: chrome ? false : 'Chrome not found (set C
     }
   });
 
+  test('live lookups: the API answer decides LIVE, "no report", or a labelled recorded sample', async () => {
+    const b = await launch({ width: 1024, height: 700 });
+    // /api/metar is answered in the browser's network layer, so no request leaves the machine.
+    // The HTML answer is what a host with no API sends back: a Pages site without the Function
+    // (its fallback page) or one past its daily Functions allowance.
+    const answers = {
+      KSFO: ['application/json; charset=utf-8', JSON.stringify({ id: 'KSFO', raw: 'METAR KSFO 261756Z 29012KT 10SM FEW015 SCT200 18/12 A2992', obsTime: Date.UTC(2026, 8, 26, 17, 56) / 1000, station: { name: 'Test field', lat: 37.62, lon: -122.37, elevM: 3 } })],
+      ZZZZ: ['application/json; charset=utf-8', JSON.stringify({ error: 'unknown_station', message: 'No recent report for that code.' })],
+      EGLL: ['text/html; charset=utf-8', '<!doctype html><title>sky-report</title>'],
+    };
+    const asked = [];
+    b.on('Fetch.requestPaused', ({ requestId, request }) => {
+      const id = new URL(request.url).searchParams.get('id');
+      asked.push(id);
+      const [type, text] = answers[id] ?? answers.ZZZZ;
+      void b.send('Fetch.fulfillRequest', { requestId, responseCode: 200, responseHeaders: [{ name: 'content-type', value: type }], body: Buffer.from(text).toString('base64') });
+    });
+    const until = async (expr) => {
+      for (let i = 0; i < 200; i++) {
+        if (await b.evaluate(expr)) return;
+        await sleep(100);
+      }
+      const state = await b.evaluate('JSON.stringify({ bar: document.getElementById("bar").hidden, icao: document.getElementById("icao").value, err: document.getElementById("bar-error").textContent, explain: document.getElementById("explain").textContent, station: document.documentElement.dataset.station, origin: document.documentElement.dataset.origin, active: document.activeElement?.id })');
+      assert.fail(`timed out waiting for ${expr}: ${state}; asked ${asked.join(',')}`);
+    };
+    const lookUp = async (id) => {
+      for (const k of id) await b.key(k);
+      await b.key('Enter', '\r');
+    };
+    try {
+      await b.send('Fetch.enable', { patterns: [{ urlPattern: '*/api/metar*' }] });
+      await b.goto(`${base}?id=KSFO&still=1`);
+      await until('document.documentElement.dataset.origin === "live"');
+      assert.match(await b.evaluate('document.getElementById("station-obs").textContent'), /LIVE/);
+      assert.ok((await b.evaluate('[...document.querySelectorAll("#metar .tok")].map((t) => t.textContent)')).includes('29012KT'));
+
+      // An unknown station says so in the bar and leaves the live sky alone.
+      await lookUp('ZZZZ');
+      await until('/ZZZZ: No recent report/.test(document.getElementById("bar-error").textContent)');
+      assert.equal(await b.evaluate('document.documentElement.dataset.station'), 'KSFO');
+      assert.equal(await b.evaluate('document.documentElement.dataset.origin'), 'live');
+      await b.key('Escape');
+      assert.equal(await b.evaluate('document.getElementById("bar").hidden'), true);
+      // Focus leaves the hidden bar at once (it used to stay on the input and take the next keys).
+      assert.equal(await b.evaluate('document.getElementById("bar").contains(document.activeElement)'), false);
+
+      // No API behind this host: the recorded sample, labelled as one, and the reason.
+      await lookUp('EGLL');
+      await until('document.documentElement.dataset.station === "EGLL"');
+      assert.equal(await b.evaluate('document.documentElement.dataset.origin'), 'sample');
+      assert.match(await b.evaluate('document.getElementById("station-obs").textContent'), /RECORDED SAMPLE/);
+      assert.match(await b.evaluate('document.getElementById("explain").textContent'), /not available on this server.*recorded EGLL report/);
+
+      assert.deepEqual(asked, ['KSFO', 'ZZZZ', 'EGLL']);
+      assert.deepEqual(relevant(b.problems), []);
+    } finally {
+      await b.close();
+    }
+  });
+
   test('prefers-reduced-motion freezes the drift', async () => {
     const b = await launch({ width: 1024, height: 700, reducedMotion: true });
     try {

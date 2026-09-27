@@ -115,6 +115,10 @@ export async function launch({ width = 1280, height = 800, deviceScaleFactor = 1
     send,
     evaluate,
     problems,
+    /** Listen for a DevTools event, e.g. on('Fetch.requestPaused', fn). */
+    on(method, fn) {
+      listeners.set(method, [...(listeners.get(method) ?? []), fn]);
+    },
     async goto(url, { readyTimeout = 30000 } = {}) {
       await send('Page.navigate', { url });
       const start = Date.now();

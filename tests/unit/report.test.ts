@@ -1,7 +1,7 @@
 import { test, describe } from 'node:test';
 import assert from 'node:assert/strict';
 import { buildReport, labelLines, traceLines, tokenExplanation, focusFor, formatLatLon, shortName, formatObs } from '../../src/app/report.ts';
-import { toSource } from '../../src/app/api.ts';
+import { toSource, fetchLive, LiveError } from '../../src/app/api.ts';
 import { SAMPLES } from '../../src/app/samples.ts';
 import { parseMetar } from '../../src/metar/parse.ts';
 import { FOCUS } from '../../src/scene/mapping.ts';
@@ -151,5 +151,68 @@ describe('API response validation (client side)', () => {
   test('non-numeric coordinates become null', () => {
     const s = toSource({ id: 'EGLL', raw: 'M', obsTime: 'soon', station: { lat: '51', lon: null } });
     assert.deepEqual([s?.obsTime, s?.station?.lat, s?.station?.lon], [null, null, null]);
+  });
+});
+
+describe('API client: live or fallback', () => {
+  const EGLL = { id: 'EGLL', raw: 'METAR EGLL 260650Z AUTO VRB02KT 9999 NCD 12/10 Q1023', obsTime: 1, station: { name: 'Heathrow', lat: 51.4, lon: -0.4, elevM: 26 } };
+  const json = (body: unknown, status = 200) => new Response(JSON.stringify(body), { status, headers: { 'content-type': 'application/json; charset=utf-8' } });
+
+  async function withFetch<T>(respond: (url: string) => Response | Promise<Response>, run: () => Promise<T>): Promise<{ result?: T; error?: unknown; urls: string[] }> {
+    const real = globalThis.fetch;
+    const urls: string[] = [];
+    globalThis.fetch = (async (input: RequestInfo | URL) => {
+      const url = String(input);
+      urls.push(url);
+      return respond(url);
+    }) as typeof fetch;
+    try {
+      return { result: await run(), urls };
+    } catch (error) {
+      return { error, urls };
+    } finally {
+      globalThis.fetch = real;
+    }
+  }
+
+  const kind = (e: unknown) => (e instanceof LiveError ? e.kind : `not a LiveError: ${String(e)}`);
+
+  test('a report from the same-origin API is live', async () => {
+    const r = await withFetch(() => json(EGLL), () => fetchLive('EGLL'));
+    assert.deepEqual(r.urls, ['/api/metar?id=EGLL']);
+    assert.equal(r.result?.raw, EGLL.raw);
+  });
+
+  test('no API on this host (the SPA page, or an error page, comes back as HTML) is "unavailable"', async () => {
+    for (const status of [200, 404, 429, 500]) {
+      const r = await withFetch(() => new Response('<!doctype html><title>x</title>', { status, headers: { 'content-type': 'text/html' } }), () => fetchLive('EGLL'));
+      assert.equal(kind(r.error), 'unavailable', String(status));
+      assert.match((r.error as Error).message, /not available on this server/);
+    }
+  });
+
+  test('a network failure is "unavailable"; the static server\'s no_worker answer too', async () => {
+    const down = await withFetch(() => Promise.reject(new TypeError('Failed to fetch')), () => fetchLive('EGLL'));
+    assert.equal(kind(down.error), 'unavailable');
+    const noWorker = await withFetch(() => json({ error: 'no_worker', message: 'static only' }), () => fetchLive('EGLL'));
+    assert.equal(kind(noWorker.error), 'unavailable');
+  });
+
+  test('API errors keep their meaning: 400 invalid, unknown station, upstream trouble', async () => {
+    const invalid = await withFetch(() => json({ error: 'invalid_id', message: 'Use a 4-character ICAO airport code, like EGLL or KSFO.' }, 400), () => fetchLive('EG1'));
+    assert.equal(kind(invalid.error), 'invalid');
+    assert.match((invalid.error as Error).message, /4-character ICAO/);
+    const unknown = await withFetch(() => json({ error: 'unknown_station', message: 'No recent report for that code.' }), () => fetchLive('ZZZZ'));
+    assert.equal(kind(unknown.error), 'unknown');
+    assert.match((unknown.error as Error).message, /^ZZZZ: No recent report/);
+    for (const [code, status] of [['upstream_error', 502], ['upstream_timeout', 504]] as const) {
+      const r = await withFetch(() => json({ error: code, message: 'Try again in a minute.' }, status), () => fetchLive('EGLL'));
+      assert.equal(kind(r.error), 'upstream', code);
+    }
+  });
+
+  test('a 200 that is not a report is "upstream", never shown as live', async () => {
+    const r = await withFetch(() => json({ id: 42 }), () => fetchLive('EGLL'));
+    assert.equal(kind(r.error), 'upstream');
   });
 });
