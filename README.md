@@ -16,7 +16,7 @@ It is an honest approximation, not a photograph. The page says which parts are d
 4. Hover over or tab to a group such as `BKN025` or `27015KT`. A one-line meaning appears ("broken cloud at 2,500 ft above the airport, 5–7 eighths of the sky — drawn as cloud layer 1"), and that layer, the haze or the wind is highlighted in amber in the sky.
 5. "How this is drawn" lists, for the current report, every visible element and the group or calculation behind it.
 
-You can also paste a whole METAR into the bar. Twelve recorded reports (from 26 Sep 2026) are bundled, so the page works offline and without the Worker. They are always labelled RECORDED SAMPLE, never LIVE.
+You can also paste a whole METAR into the bar. Twelve recorded reports (from 26 Sep 2026) are bundled, so the page works offline and without the API. They are always labelled RECORDED SAMPLE, never LIVE.
 
 ## What is data and what is drawn
 
@@ -70,13 +70,14 @@ The "Quality" button shows the tier and the frames per second **measured on your
 
 ## Build, run, test
 
-Needs **Node ≥ 22.18** (TypeScript runs directly under Node's type stripping for tests). The smoke tests need Google Chrome or Chromium (set `CHROME_PATH` if it is not in a standard place). Wrangler 4 is only needed for `npm run dev`.
+Needs **Node ≥ 22.18** (TypeScript runs directly under Node's type stripping for tests). The smoke tests need Google Chrome or Chromium (set `CHROME_PATH` if it is not in a standard place). Wrangler 4 is only needed for `npm run dev` and `npm run dev:pages`; the Pages smoke test uses it when it is installed and is skipped otherwise (set `WRANGLER` if it is not on `PATH`).
 
 ```sh
 npm ci
 npm run build      # → dist/ (index.html, content-hashed JS and CSS, _headers, favicon)
 npm test           # typecheck, unit tests, build, then the headless-Chrome smoke tests
 npm run dev        # build + wrangler dev: the full app with the live Worker on :8787
+npm run dev:pages  # build + wrangler pages dev: the Pages site with its Function, as deployed, on :8788
 npm run serve      # static dist/ only, with the production headers; live lookups fall back to samples
 npm run shots -- --out /tmp/sky-shots   # screenshots of every sample, desktop and 400 px phone
 npm run calibrate  # re-measure DRAWN_COVERAGE (needs a build and Chrome); prints the table
@@ -97,15 +98,20 @@ Useful URLs: `?id=KSFO` (live), `?sample=YSSY` (recorded), `?metar=METAR%20…` 
 - **Mapping** (`tests/unit/mapping.test.ts`, 34 tests): layers, coverage and its calibration table, layers squeezed too thin to see, drift direction and units, Koschmieder, VV depth, precipitation, time resolution, view, exposure, and uniforms matching the shader's declarations. Every one of the 400 real reports maps without a NaN.
 - **Quality controller** (`tests/unit/quality.test.ts`, 19 tests): sustained 300, 500 and 1,000 ms frames step down to *minimal* and then to still mode within seconds; a SwiftShader-like 1,000 → 330 → 140 ms profile ends in still mode; isolated hitches change nothing, a run of long frames does; frames paced at 60 Hz and 120 Hz step back up; a tier that proved too slow is never re-entered.
 - **Atmosphere, text dimming, noise** (`atmosphere.test.ts`, `scrim.test.ts`): the TypeScript sky ambient uses the shader's exact constants; every corner of every text block gets the full brightness cap; per-slice equalisation makes every plane uniform.
-- **Worker** (`tests/unit/worker.test.ts`, 33 tests), with mocked upstream, an in-memory Cache API and the per-isolate memory cache:
+- **API handler** (`tests/unit/worker.test.ts`, 33 tests), with mocked upstream, an in-memory Cache API and the per-isolate memory cache:
   - validation;
   - cache hit/miss/expiry ("100 views in 5 minutes cost one upstream request"), with the Cache API and, where it is missing, with the memory cache alone;
   - unknown station, upstream 500/429, network failure, malformed and oversized bodies (including an endless stream, cut off at the cap), and timeout.
-- **Report/labels/API client** (`tests/unit/report.test.ts`, 17 tests), including "below the horizon" at night and honest wording for squeezed layers.
+- **Pages Function** (`tests/unit/pages-function.test.ts`, 5 tests): called the way Pages calls it (`{ request, waitUntil }`), with a mocked upstream and a stand-in Cache API as globals. It answers through the shared handler, writes the cache through `waitUntil`, serves the second view from the Cache API (or, without one, from memory), never sends a bad id upstream, and shares one wiring and one memory cache with the Worker entry.
+- **Report/labels/API client** (`tests/unit/report.test.ts`, 22 tests), including "below the horizon" at night, honest wording for squeezed layers, and how the client tells a live report from "no API here" (an HTML page or error page, a network failure), "no report" and upstream trouble.
 - **Third-party notices** (`tests/smoke/notices.test.mjs`): `dist/THIRD-PARTY-NOTICES.txt` exists, the page's sources list links to it, and it names every bundled sample station, the recording date, the data's source and terms, and the fonts.
+- **Pages** (`tests/smoke/pages.test.mjs`, runs Wrangler locally; nothing is deployed and nothing reaches aviationweather.gov):
+  - Wrangler's own Pages Functions build compiles `functions/` and writes a `_routes.json` that sends only `/api/*` to the Function;
+  - `wrangler pages dev dist` serves the page with its `_headers`, and answers `/api/*` with the handler's JSON (400 for a bad id, 404, 405), never with the page.
 - **Smoke** (`tests/smoke/dist.test.mjs`, headless Chrome over the DevTools protocol):
   - `dist/` loads and draws with WebGL2, with no console errors;
   - hover and keyboard flows (Tab stays inside the "How this is drawn" note and reaches its links), and the offline fallback;
+  - **live lookups**, with `/api/metar` answered inside the browser's network layer: a report is drawn and labelled LIVE; an unknown station says so in the bar and leaves the sky alone; an HTML answer (a host with no API) falls back to the recorded sample, labelled RECORDED SAMPLE, with the reason;
   - reduced motion, and the frames-per-second label;
   - a **slow GPU**: under SwiftShader the page steps down to *minimal* and then to still mode, and says so;
   - a true **400 px** viewport through device emulation: no horizontal scroll, and every METAR group (long `RMK` sections too) inside the screen;
@@ -115,32 +121,42 @@ Useful URLs: `?id=KSFO` (live), `?sample=YSSY` (recorded), `?metar=METAR%20…` 
   - **daytime VV fog** is bright and grey: mean saturation under 0.08 (it was 0.49, sky blue, before) and brightness over 0.75;
   - **cloud cover from below**: 18 reports covering every style and amount, at several heights, measured with the probe (a pixel is cloud when its opacity is over 0.2, over a 480 km square). Each must be within **half an okta (±1/16 of the sky)** of the reported amount. Measured: all within 1 percentage point, e.g. `FEW030CB` 19.2% for a target of 18.75%, `SCT020TCU` 43.9% for 43.75%, `BKN300` 75.0% for 75%.
 
-## The Worker and the Cloudflare free plan
+## The API and the Cloudflare free plan
 
-`worker/` is one endpoint, `GET /api/metar?id=XXXX`. It proxies the public [aviationweather.gov Data API](https://aviationweather.gov/data/api/) (`/api/data/metar?ids=XXXX&format=json`).
+The page asks its own site for the weather: one endpoint, `GET /api/metar?id=XXXX`, which proxies the public [aviationweather.gov Data API](https://aviationweather.gov/data/api/) (`/api/data/metar?ids=XXXX&format=json`). The handler (`worker/handler.ts`) has no Cloudflare-only types; `worker/runtime.ts` connects it to the platform's `fetch`, the Cache API and a memory cache, and two thin entry points share that wiring:
 
-- **Validation:** exactly four letters or digits, starting with a letter. Anything else gets a 400 and never reaches upstream.
+- **Pages Function** (`functions/api/[[path]].ts`), which the live site uses. `wrangler pages deploy dist`, run from the repo root, uploads `dist/` and bundles `functions/` with it, so the page's same-origin call works on the `pages.dev` address with no other setup.
+- **Standalone Worker** (`worker/index.ts` and `wrangler.toml`): the same API, with `dist/` served as Workers static assets, for anyone who would rather deploy a Worker.
+
+What the handler does:
+
+- **Validation:** exactly four letters or digits, starting with a letter. Anything else gets a 400 and never reaches upstream. The page checks the same rule before it asks, so the 400 is a second line of defence.
 - **Cache:** two layers, both **5 minutes**, keyed by the normalised station code. "No report for that code" is cached too, so a typo can't hammer upstream.
-  - The Workers **Cache API**, shared by every visitor in one data centre. Cloudflare documents it for Workers on a **custom domain or route**; on a `*.workers.dev` address it is not expected to work, and I have not been able to check either on Cloudflare, because the app is not deployed. **If** the Worker has a route, one upstream request serves every view of a station in that data centre for five minutes.
-  - A small **in-memory cache per Worker isolate** (at most 256 stations, about 1 KB each), used when the Cache API has nothing. It needs no setup, but an isolate serves only some of the requests and can be recycled at any time, so it cuts upstream traffic without guaranteeing "one request per five minutes".
+  - The **Cache API**, shared by every visitor in one data centre (it is not copied between data centres). Cloudflare's documentation says it works for Pages Functions, on a custom domain *or* on `*.pages.dev`, and for Workers on a custom domain or route, but not on `*.workers.dev`. So on the live Pages site it should be in effect. I have only checked Wrangler's local emulation of it: under `wrangler pages dev`, the second request for a station came back `x-cache: HIT` without a second upstream call. That shows the code path, not Cloudflare's production cache. On the deployed site, two requests for the same station should show `x-cache: MISS` and then `HIT`. A `HIT-MEMORY` means the answer came from the memory cache instead.
+  - A small **in-memory cache per isolate** (at most 256 stations, about 1 KB each), used when the Cache API has nothing. It needs no setup, but an isolate serves only some of the requests and can be recycled at any time, so it cuts upstream traffic without guaranteeing "one request per five minutes".
 - **Size cap:** the upstream body is read as a stream and abandoned as soon as it passes 64 KB.
 - **Timeout and errors:** upstream gets 6 s. Errors come back as clear JSON: `invalid_id` (400), `upstream_error` (502, for upstream 5xx/429, bad or oversized bodies, or network failure) and `upstream_timeout` (504). An unknown station is an ordinary answer, `{"error":"unknown_station"}` with status 200, much as upstream itself answers 204 for "no data". That keeps a typo from showing as a failed request in the browser console.
 - **Upstream etiquette:** a descriptive User-Agent, as the API docs ask. The API allows 100 requests a minute.
 
+What the page does with the answer (`src/app/api.ts`): a report is drawn and labelled LIVE. Anything that is not the API's JSON (no API on this host, an error page, no connection) means live data is unavailable, and the page draws its recorded sample for that station (or the first sample), labelled RECORDED SAMPLE, and says why. An unknown station is reported in the bar.
+
 **How it fits the free plan.**
 
-- Static files in `dist/` are served by Workers static assets, which is free and does not count as Worker requests. Only `/api/*` runs the Worker (`run_worker_first` in `wrangler.toml`).
-- The free plan allows 100,000 Worker requests a day. A page view makes one API call, plus one per station typed, so that is roughly 50,000–100,000 views a day.
-- With a route (so the Cache API works), upstream traffic is bounded by the cache, not by visitors: at most one request per station per 5 minutes per data centre (288 a day per busy station per data centre), far inside the upstream's 100 a minute. On `workers.dev` only the per-isolate memory cache applies, so expect more upstream requests than that; how many more depends on how Cloudflare spreads requests over isolates, which I have not measured.
-- The 10 ms CPU limit counts CPU, not waiting. Per request the Worker does a regex check, one cache lookup and one `fetch`, then parses and re-serialises about 1 KB of JSON; waiting on aviationweather.gov is I/O time. I have not measured CPU time on Cloudflare itself, because the app is not deployed yet. Locally, under `wrangler dev`, a cached answer took 2 ms of wall time.
-- Caveat: the Cache API is per data centre, and Cloudflare documents it for Workers on a custom domain or route. Attach one to get the shared cache.
+- Static files are free and unlimited, and they never run the Function. When Wrangler finds `functions/`, it writes a `_routes.json` that sends only `/api/*` to the Function; a test runs Wrangler's own build and checks that. On the standalone Worker, `run_worker_first = ["/api/*"]` in `wrangler.toml` does the same.
+- Function requests count toward the Workers Free plan's 100,000 requests a day, shared with any Workers on the same account. A page view makes one API call, plus one per station typed, and the browser keeps each answer for a minute. That is roughly 50,000–100,000 views a day.
+- With the Cache API, upstream traffic is bounded by the cache, not by visitors: at most one request per station per 5 minutes per data centre (288 a day per busy station per data centre), far inside the upstream's 100 a minute. Where only the memory cache applies, expect more upstream requests than that; how many more depends on how Cloudflare spreads requests over isolates, which I have not measured.
+- The 10 ms CPU limit counts CPU, not waiting. Per request the handler does a regex check, one or two cache lookups and at most one `fetch`, then parses and re-serialises about 1 KB of JSON; waiting on aviationweather.gov is I/O time. I have not measured CPU time on Cloudflare itself. Locally, under `wrangler pages dev`, a cached answer took about 2 ms of wall time and a fresh one 36–300 ms, almost all of it waiting on upstream.
+- When the day's free Function requests run out, Pages either serves static files in place of the Function ("fail open") or returns an error page ("fail closed"), a per-project setting on the Workers Free plan. Either way `/api/metar` stops returning the API's JSON, and the page falls back to its labelled recorded samples. A browser test fakes such an answer (a page instead of JSON), and unit tests cover HTML error pages with error statuses.
+- `_headers` applies to static files only: Cloudflare does not apply it to Function responses, so the handler sets its own `Content-Type`, `X-Content-Type-Options: nosniff` and `Cache-Control`. The page's Content-Security-Policy allows the call because it is same-origin (`connect-src 'self'`).
 - `_headers` gives the content-hashed `/assets/*` a year-long immutable cache and `/` and `/index.html` `no-cache`. Cloudflare joins the values of every matching rule, so the catch-all `/*` rule carries no `Cache-Control` at all (the local server merges rules the same way, and a test checks the result).
 
-**Deploying.** `npm run build`, then `npx wrangler deploy` deploys the Worker and `dist/` together. The owner deploys through a guarded script that pins the right Cloudflare account, so the repo deliberately has no deploy script. `dist/` on its own is also a valid static site (`wrangler pages deploy dist`): without the Worker, the page falls back to the recorded samples and says so.
+**Deploying.** Run `npm run build`, then, from the repo root (where `functions/` is), `npx wrangler pages deploy dist --project-name <project>` for the Pages site, or `npx wrangler deploy` for the standalone Worker. `wrangler.toml` belongs to the Worker. Wrangler's `pages` commands skip it, because it has no `pages_build_output_dir`, so the Function's compatibility date comes from the Pages project's settings, not from this file. It uses only standard `fetch`, streams and the Cache API, so it should not depend on that date. The owner deploys through a guarded script that pins the right Cloudflare account, so the repo deliberately has no deploy script. `dist/` on any other static host still works: without the API, the page falls back to the recorded samples and says so.
+
+**What I could not check locally.** Nothing here has been deployed by me. The Cache API on `pages.dev`, CPU time, and the fail-open or fail-closed behaviour are all taken from Cloudflare's documentation. Locally I ran the Pages Function and the Worker under Wrangler, with real aviationweather.gov requests for a few stations.
 
 ## Privacy
 
-There are no cookies, analytics or accounts. `localStorage` keeps only the last station code, so you come back to it. The browser talks to this site and to Google Fonts (for the B612 typefaces). The Worker talks only to aviationweather.gov.
+There are no cookies, analytics or accounts. `localStorage` keeps only the last station code, so you come back to it. The browser talks to this site and to Google Fonts (for the B612 typefaces). The API (the Pages Function, or the Worker) talks only to aviationweather.gov.
 
 ## Honest limitations
 
