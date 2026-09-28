@@ -106,7 +106,7 @@ Useful URLs: `?id=KSFO` (live), `?sample=YSSY` (recorded), `?metar=METAR%20…` 
   - unknown station, upstream 500/429, network failure, malformed and oversized bodies (including an endless stream, cut off at the cap), and timeout.
 - **Pages Function** (`tests/unit/pages-function.test.ts`, 5 tests): called the way Pages calls it (`{ request, waitUntil }`), with a mocked upstream and a stand-in Cache API as globals. It answers through the shared handler, writes the cache through `waitUntil`, serves the second view from the Cache API (or, without one, from memory), never sends a bad id upstream, and shares one wiring and one memory cache with the Worker entry.
 - **Report/labels/API client** (`tests/unit/report.test.ts`, 22 tests), including "below the horizon" at night, honest wording for squeezed layers, and how the client tells a live report from "no API here" (an HTML page or error page, a network failure), "no report" and upstream trouble.
-- **Third-party notices** (`tests/smoke/notices.test.mjs`): `dist/THIRD-PARTY-NOTICES.txt` exists, the page's sources list links to it, and it names every bundled sample station, the recording date, the data's source and terms, and the fonts.
+- **Third-party notices** (`tests/smoke/notices.test.mjs`): `dist/THIRD-PARTY-NOTICES.txt` exists, the page's sources list links to it, and it names every bundled sample station, the recording date, the data's source and terms, and each self-hosted font file with its OFL licence text.
 - **Pages** (`tests/smoke/pages.test.mjs`, runs Wrangler locally; nothing is deployed and nothing reaches aviationweather.gov):
   - Wrangler's own Pages Functions build compiles `functions/` and writes a `_routes.json` that sends only `/api/*` to the Function;
   - `wrangler pages dev dist` serves the page with its `_headers`, and answers `/api/*` with the handler's JSON (400 for a bad id, 404, 405), never with the page.
@@ -158,7 +158,7 @@ What the page does with the answer (`src/app/api.ts`): a report is drawn and lab
 
 ## Privacy
 
-There are no cookies, analytics or accounts. `localStorage` keeps only the last station code, so you come back to it. The browser talks to this site and to Google Fonts (for the B612 typefaces). The API (the Pages Function, or the Worker) talks only to aviationweather.gov.
+There are no cookies, analytics or accounts. `localStorage` keeps only the last station code, so you come back to it. The browser talks only to this site: the B612 typefaces are served from it, not from Google Fonts, so a visit reaches no third party. The API (the Pages Function, or the Worker) talks only to aviationweather.gov.
 
 ## Honest limitations
 
@@ -187,7 +187,7 @@ There are no cookies, analytics or accounts. `localStorage` keeps only the last 
 
 - Weather data: [Aviation Weather Center](https://aviationweather.gov/), NOAA / National Weather Service. Public US-government data. The recorded samples and the test fixture are real reports from that API, fetched on 26 Sep 2026.
 - Sun: NOAA Global Monitoring Laboratory's solar position equations, after Jean Meeus, *Astronomical Algorithms*.
-- Type: [B612 and B612 Mono](https://fonts.google.com/specimen/B612), the typefaces originally designed for Airbus cockpit displays, loaded from Google Fonts (not shipped in `dist/`). Both are under the SIL Open Font License 1.1.
+- Type: [B612 and B612 Mono](https://fonts.google.com/specimen/B612), the typefaces originally designed for Airbus cockpit displays. The Latin-subset WOFF2 files (five, about 63 KB together) ship in `dist/assets/` under content-hashed names, so nothing is fetched from Google. Both are under the SIL Open Font License 1.1; the licence text is in `licenses/` and in `dist/THIRD-PARTY-NOTICES.txt`.
 - Third-party notices: `npm run build` writes `dist/THIRD-PARTY-NOTICES.txt`, linked from the Sources list in "How this is drawn". It covers the 12 recorded METAR samples bundled into the JavaScript (public US-government data from the Aviation Weather Center; terms per the [NWS disclaimer](https://www.weather.gov/disclaimer)). The bundle contains no third-party code: `scripts/notices.mjs` checks esbuild's metafile at build time and would list, with its licence text, any library taken from `node_modules`. esbuild, TypeScript and `@types/node` are build tools only.
 
 Built with AI assistance (Claude).

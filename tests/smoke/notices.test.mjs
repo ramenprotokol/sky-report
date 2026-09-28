@@ -21,13 +21,20 @@ test('the page links to the notices from its sources list', () => {
   assert.match(html, /<h3>Sources<\/h3>\s*<ul>[\s\S]*<a href="THIRD-PARTY-NOTICES\.txt">[\s\S]*?<\/ul>/);
 });
 
-test('the notices cover the bundled samples, the fonts and the (absent) third-party code', () => {
+test('the notices cover the bundled samples, the self-hosted fonts and the (absent) third-party code', () => {
   const text = readFileSync(file, 'utf8');
   assert.match(text, new RegExp(`Recorded METAR samples \\(${SAMPLES.length} reports, recorded ${SAMPLES_RECORDED}\\)`));
   for (const s of SAMPLES) assert.match(text, new RegExp(`\\b${s.id}\\b`), `${s.id} missing`);
   assert.match(text, /aviationweather\.gov/);
   assert.match(text, /public domain, per the NWS disclaimer/);
-  assert.match(text, /B612 and B612 Mono[\s\S]*SIL Open Font License 1\.1/);
+  // The five self-hosted font files, each with the OFL's copyright line and the licence text itself.
+  for (const f of ['b612-400', 'b612-700', 'b612-italic-400', 'b612-mono-400', 'b612-mono-700']) {
+    assert.match(text, new RegExp(`assets/${f}-[A-Z0-9]{8}\\.woff2`), `${f} missing`);
+  }
+  assert.match(text, /Copyright 2012 The B612 Project Authors/);
+  assert.match(text, /SIL Open Font License, Version 1\.1/);
+  assert.match(text, /PERMISSION & CONDITIONS/);
+  assert.doesNotMatch(text, /googleapis|loaded from Google Fonts/);
   assert.match(text, /Third-party code: none\./);
   assert.doesNotMatch(text, /\/Users\/|\/home\//, 'no local paths');
 });

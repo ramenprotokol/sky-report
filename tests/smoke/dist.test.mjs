@@ -14,8 +14,6 @@ import { decodePng, luminanceAt, contrast, hexLuminance } from './png.mjs';
 
 const dist = fileURLToPath(new URL('../../dist', import.meta.url));
 const chrome = findChrome();
-// Google Fonts may be unreachable offline; that is not an app error.
-const relevant = (problems) => problems.filter((p) => !/fonts\.(googleapis|gstatic)\.com/.test(p));
 
 let server;
 let base;
@@ -35,6 +33,25 @@ describe('dist/ contents', () => {
       assert.match(r, /-[A-Z0-9]{8}\.(js|css)$/, 'content-hashed name');
       assert.ok(existsSync(join(dist, r)), r);
     }
+  });
+
+  test('fonts ship from this site: no Google Fonts anywhere in dist/, hashed woff2 files under the long cache', async () => {
+    const files = await readdir(join(dist, 'assets'));
+    const fonts = files.filter((f) => f.endsWith('.woff2')).sort();
+    assert.deepEqual(
+      fonts.map((f) => f.replace(/-[A-Z0-9]{8}\.woff2$/, '')),
+      ['b612-400', 'b612-700', 'b612-italic-400', 'b612-mono-400', 'b612-mono-700'],
+      'five content-hashed B612 files',
+    );
+    const css = await readFile(join(dist, 'assets', files.find((f) => f.endsWith('.css'))), 'utf8');
+    for (const f of fonts) assert.ok(css.includes(f), `${f} referenced from the stylesheet`);
+    const html = await readFile(join(dist, 'index.html'), 'utf8');
+    const headers = await readFile(join(dist, '_headers'), 'utf8');
+    for (const [name, text] of [['index.html', html], ['css', css], ['_headers', headers]]) {
+      assert.doesNotMatch(text, /googleapis|gstatic|fonts\.google/, `${name} must not reach Google`);
+    }
+    const rules = parseHeaders(headers);
+    assert.match(headersFor(rules, '/')['content-security-policy'], /style-src 'self'; font-src 'self';/);
   });
 
   test('_headers, merged the way Cloudflare merges rules: strict CSP, long cache only on hashed assets', async () => {
@@ -90,6 +107,11 @@ describe('in headless Chrome', { skip: chrome ? false : 'Chrome not found (set C
 
       // Hover a cloud group: the one-line meaning appears. (Wait for web fonts so the layout is final.)
       await b.evaluate('document.fonts.ready.then(() => true)');
+      // Every request stayed on this origin (the fonts included): nothing about the visit reaches a third party.
+      const offsite = await b.evaluate(`performance.getEntriesByType('resource').map((e) => e.name).filter((u) => !u.startsWith(location.origin))`);
+      assert.deepEqual(offsite, []);
+      const faces = await b.evaluate(`[...document.fonts].filter((f) => f.status === 'loaded').map((f) => f.family.replace(/"/g, '')).sort()`);
+      assert.ok(faces.includes('B612') && faces.includes('B612 Mono'), `B612 faces loaded from this site: ${faces.join(', ')}`);
       await b.send('Input.dispatchMouseEvent', { type: 'mouseMoved', x: 5, y: 5 });
       await b.hover('#metar .tok[data-i="7"]');
       await sleep(250);
@@ -137,7 +159,7 @@ describe('in headless Chrome', { skip: chrome ? false : 'Chrome not found (set C
       await b.key('Escape');
       assert.equal(await b.evaluate('document.getElementById("notes").hidden'), true);
 
-      assert.deepEqual(relevant(b.problems), []);
+      assert.deepEqual(b.problems, []);
     } finally {
       await b.close();
     }
@@ -152,7 +174,7 @@ describe('in headless Chrome', { skip: chrome ? false : 'Chrome not found (set C
       assert.match(await b.evaluate('document.getElementById("station-obs").textContent'), /PASTED REPORT/);
       await b.goto(`${base}?metar=${encodeURIComponent('not a metar at all')}&still=1`);
       assert.match(await b.evaluate('document.getElementById("explain").textContent'), /could not be read/);
-      assert.deepEqual(relevant(b.problems), []);
+      assert.deepEqual(b.problems, []);
     } finally {
       await b.close();
     }
@@ -212,7 +234,7 @@ describe('in headless Chrome', { skip: chrome ? false : 'Chrome not found (set C
       assert.match(await b.evaluate('document.getElementById("explain").textContent'), /not available on this server.*recorded EGLL report/);
 
       assert.deepEqual(asked, ['KSFO', 'ZZZZ', 'EGLL']);
-      assert.deepEqual(relevant(b.problems), []);
+      assert.deepEqual(b.problems, []);
     } finally {
       await b.close();
     }
@@ -264,7 +286,7 @@ describe('in headless Chrome', { skip: chrome ? false : 'Chrome not found (set C
       assert.equal(motion, 'still', `still animating after 60 s (tiers seen: ${[...seen].join(', ')})`);
       assert.ok(seen.has('minimal'), [...seen].join(', '));
       assert.match(await b.evaluate('document.getElementById("quality").textContent'), /minimal \(auto\) · still: too slow to animate here/);
-      assert.deepEqual(relevant(b.problems), []);
+      assert.deepEqual(b.problems, []);
     } finally {
       await b.close();
     }
@@ -288,7 +310,7 @@ describe('in headless Chrome', { skip: chrome ? false : 'Chrome not found (set C
         );
         assert.equal(clipped, '[]', `${id}: groups off screen: ${clipped}`);
       }
-      assert.deepEqual(relevant(b.problems), []);
+      assert.deepEqual(b.problems, []);
     } finally {
       await b.close();
     }
@@ -321,7 +343,7 @@ describe('in headless Chrome', { skip: chrome ? false : 'Chrome not found (set C
       const [ix, iy] = await centre('#icao');
       await tap(ix, iy); // inside the bar: stays open
       assert.equal(await open(), true, 'a tap inside the bar keeps it open');
-      assert.deepEqual(relevant(b.problems), []);
+      assert.deepEqual(b.problems, []);
     } finally {
       await b.close();
     }
@@ -417,7 +439,7 @@ describe('in headless Chrome', { skip: chrome ? false : 'Chrome not found (set C
         results.push(`${group} ${(cover * 100).toFixed(1)}% (target ${((oktas / 8) * 100).toFixed(1)}%)`);
         assert.ok(Math.abs(cover - oktas / 8) <= 1 / 16, results.at(-1));
       }
-      assert.deepEqual(relevant(b.problems), []);
+      assert.deepEqual(b.problems, []);
     } finally {
       await b.close();
     }

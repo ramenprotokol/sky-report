@@ -21,9 +21,11 @@ const result = await build({
   minify: true,
   sourcemap: false,
   legalComments: 'none',
-  loader: { '.frag': 'text', '.vert': 'text' },
+  // Fonts referenced from the stylesheet are copied into assets/ under content-hashed names.
+  loader: { '.frag': 'text', '.vert': 'text', '.woff2': 'file' },
   outdir: join(dist, 'assets'),
   entryNames: '[name]-[hash]',
+  assetNames: '[name]-[hash]',
   metafile: true,
   logLevel: 'warning',
 });
@@ -42,7 +44,7 @@ for (const name of await readdir(pub)) {
   await copyFile(join(pub, name), join(dist, name));
 }
 
-// THIRD-PARTY-NOTICES.txt: bundled third-party code (none today) and the recorded samples.
+// THIRD-PARTY-NOTICES.txt: bundled third-party code (none today), the fonts and the recorded samples.
 await writeNotices({ root, dist, metafile: result.metafile });
 
 const sizes = [];

@@ -4,13 +4,24 @@
 //   version, licence and licence text. Today there is none (the bundle is built only from
 //   src/), and the file says so; if a library is ever added, it is listed automatically.
 // - Data: the recorded METAR samples bundled from src/app/samples.ts.
-// - Fonts: none are self-hosted (the build fails if a font file lands in dist/). B612 and
-//   B612 Mono are loaded from Google Fonts and are only mentioned.
+// - Fonts: the B612 and B612 Mono WOFF2 files that esbuild copied into dist/assets/, each
+//   listed with its OFL copyright line and the licence text from licenses/. The build fails if
+//   a font file lands in dist/ that this list does not know.
 import { readdir, readFile, writeFile } from 'node:fs/promises';
 import { join } from 'node:path';
 import { pathToFileURL } from 'node:url';
 
 const RULE = '-'.repeat(78);
+
+/** The self-hosted fonts: source file stem → family, style and the licence file in licenses/. */
+const FONTS = {
+  'b612-400': { family: 'B612', style: 'Regular (400)', licence: 'B612-OFL.txt' },
+  'b612-700': { family: 'B612', style: 'Bold (700)', licence: 'B612-OFL.txt' },
+  'b612-italic-400': { family: 'B612', style: 'Italic (400)', licence: 'B612-OFL.txt' },
+  'b612-mono-400': { family: 'B612 Mono', style: 'Regular (400)', licence: 'B612-Mono-OFL.txt' },
+  'b612-mono-700': { family: 'B612 Mono', style: 'Bold (700)', licence: 'B612-Mono-OFL.txt' },
+};
+const FONT_SOURCE = 'https://github.com/polarsys/b612 (the Latin-subset WOFF2 files as served by Google Fonts, https://fonts.google.com/specimen/B612)';
 
 /** Wraps `text` to 78 columns, indenting continuation lines by `indent` spaces. */
 function wrap(text, indent) {
@@ -67,8 +78,27 @@ async function listFiles(dir, prefix = '') {
 }
 
 export async function writeNotices({ root, dist, metafile }) {
-  const fonts = (await listFiles(dist)).filter((f) => /\.(woff2?|ttf|otf|eot)$/i.test(f));
-  if (fonts.length) throw new Error(`third-party notices: self-hosted fonts need an entry: ${fonts.join(', ')}`);
+  const fontFiles = (await listFiles(dist)).filter((f) => /\.(woff2?|ttf|otf|eot)$/i.test(f)).sort();
+  const fontEntries = [];
+  for (const [stem, font] of Object.entries(FONTS)) {
+    const file = fontFiles.find((f) => new RegExp(`^assets/${stem}-[A-Z0-9]{8}\\.woff2$`).test(f));
+    if (!file) throw new Error(`third-party notices: font ${stem} is not in dist/assets (expected from the stylesheet)`);
+    const licence = (await readFile(join(root, 'licenses', font.licence), 'utf8')).replace(/\r\n/g, '\n').trim();
+    const copyright = licence.split('\n').find((l) => /^copyright\b/i.test(l)) ?? '';
+    if (!copyright) throw new Error(`third-party notices: licenses/${font.licence} has no copyright line`);
+    fontEntries.push({
+      heading: `${font.family} ${font.style}`,
+      fields: [
+        ['Ships', file],
+        ['Copyright', copyright],
+        ['Licence', 'SIL Open Font License 1.1 (OFL-1.1), text below'],
+        ['Source', FONT_SOURCE],
+      ],
+      texts: [[font.licence, licence]],
+    });
+  }
+  const unknown = fontFiles.filter((f) => !fontEntries.some((e) => e.fields[0][1] === f));
+  if (unknown.length) throw new Error(`third-party notices: font files without an entry: ${unknown.join(', ')}`);
 
   const packages = await Promise.all(bundledPackages(metafile).map((dir) => packageEntry(root, dir)));
 
@@ -81,6 +111,7 @@ export async function writeNotices({ root, dist, metafile }) {
 
   const entries = [
     ...packages,
+    ...fontEntries,
     {
       heading: `Recorded METAR samples (${ids.length} reports, recorded ${SAMPLES_RECORDED})`,
       fields: [
@@ -106,9 +137,9 @@ export async function writeNotices({ root, dist, metafile }) {
     '',
     wrap(code, 0),
     '',
-    'Third-party data: the recorded METAR samples, below.',
+    wrap(`Third-party fonts: ${fontEntries.map((e) => e.heading).join(', ')}, listed below. B612 was designed by Nicolas Chauveau, Thomas Paillot, Jonathan Favre-Lamarine and Jean-Luc Vinot for Airbus. The files are served from this site, so opening the page sends nothing to a font service.`, 0),
     '',
-    wrap('Fonts: none are shipped. B612 and B612 Mono (designed by Nicolas Chauveau, Thomas Paillot, Jonathan Favre-Lamarine and Jean-Luc Vinot) are loaded from Google Fonts (fonts.googleapis.com) when the page opens. Both are licensed under the SIL Open Font License 1.1.', 0),
+    'Third-party data: the recorded METAR samples, below.',
     '',
     wrap('Live reports are fetched at run time, through the Worker, from the same API. They are not part of dist/.', 0),
     '',
