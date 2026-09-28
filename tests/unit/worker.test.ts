@@ -120,6 +120,67 @@ describe('input validation', () => {
     assert.equal((await handleRequest(new Request('https://sky.example/api/other'), h.deps)).status, 404);
     assert.equal(h.calls.length, 0);
   });
+
+  test('HEAD is answered like GET; OPTIONS, PUT and DELETE are 405 with Allow', async () => {
+    const h = harness(() => new Response(EGLL_JSON));
+    const head = await handleRequest(req('?id=EGLL', 'HEAD'), h.deps);
+    assert.equal(head.status, 200);
+    assert.equal(head.headers.get('content-type'), 'application/json; charset=utf-8');
+    for (const method of ['OPTIONS', 'PUT', 'DELETE']) {
+      const res = await handleRequest(req('?id=EGLL', method), h.deps);
+      assert.equal(res.status, 405, method);
+      assert.equal(res.headers.get('allow'), 'GET, HEAD');
+      assert.equal(res.headers.get('access-control-allow-origin'), null, 'no CORS: the API is for this site only');
+    }
+    assert.equal(h.calls.length, 1, 'only HEAD went upstream');
+  });
+
+  test('a crafted id never reaches upstream, a header or the cache key: CRLF, path bits, homoglyphs, long input', async () => {
+    const h = harness(() => new Response(EGLL_JSON));
+    const bad = ['EGLL\r\nX-Injected: 1', 'EGLL/../x', '../EGLL', 'ЕGLL', 'EGL', 'EGLLX', '1GLL', 'EG LL', 'EGLL;', `${'E'.repeat(15)}GLL`, 'EGLL%0d%0a', '%45GLL'];
+    for (const id of bad) {
+      const res = await handleRequest(req(`?id=${encodeURIComponent(id)}`, 'GET'), h.deps);
+      assert.equal(res.status, 400, JSON.stringify(id));
+      assert.equal((await body(res)).error, 'invalid_id');
+      assert.equal(res.headers.get('x-injected'), null);
+    }
+    assert.equal(h.calls.length, 0, 'nothing went upstream');
+    assert.equal(h.cache.store.size, 0, 'nothing was cached');
+    // The error body is a fixed message, never the input echoed back.
+    const res = await handleRequest(req('?id=%3Cscript%3E', 'GET'), h.deps);
+    assert.doesNotMatch(await res.text(), /<script>/);
+  });
+
+  test('the upstream URL and the cache key carry only the normalised id, whatever else is in the query', async () => {
+    const h = harness(() => new Response(EGLL_JSON));
+    const first = await handleRequest(req('?id=%20egll%20&format=xml&ids=KSFO&x=%0d%0a', 'GET'), h.deps);
+    assert.equal(first.status, 200);
+    assert.equal(h.calls[0]?.url, `${UPSTREAM}?ids=EGLL&format=json`);
+    await Promise.all(h.pending);
+    // A plain request for the same station is a HIT on that one entry: the query string cannot split or poison the cache.
+    const second = await handleRequest(req('?id=EGLL', 'GET'), h.deps);
+    assert.equal(second.headers.get('x-cache'), 'HIT');
+    assert.equal(h.calls.length, 1);
+    assert.deepEqual([...h.cache.store.keys()], ['https://sky.example/api/metar?id=EGLL']);
+    // A second id parameter is ignored: URLSearchParams.get returns the first.
+    const third = await handleRequest(req('?id=EGLL&id=KSFO', 'GET'), h.deps);
+    assert.equal(third.headers.get('x-cache'), 'HIT');
+    assert.equal(h.calls.length, 1);
+  });
+
+  test('upstream strings are bounded and typed before they are served, and errors carry no upstream detail', async () => {
+    const long = 'X'.repeat(5000);
+    const h = harness(() => new Response(JSON.stringify([{ icaoId: 'EGLL', rawOb: long, name: long, lat: 'nope', lon: 999, elev: '26' }])));
+    const res = await handleRequest(req('?id=EGLL', 'GET'), h.deps);
+    const b = (await body(res)) as { raw: string; station: { name: string; lat: unknown; lon: unknown; elevM: unknown } };
+    assert.equal(b.raw.length, 600);
+    assert.equal(b.station.name.length, 120);
+    assert.deepEqual([b.station.lat, b.station.lon, b.station.elevM], [null, null, null]);
+    const boom = harness(() => new Response('<html>Internal error: /srv/awc/secret.py line 12</html>', { status: 500 }));
+    const err = await handleRequest(req('?id=EGLL', 'GET'), boom.deps);
+    assert.equal(err.status, 502);
+    assert.doesNotMatch(await err.text(), /secret|html|srv/);
+  });
 });
 
 describe('happy path', () => {
